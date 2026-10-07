@@ -7,36 +7,50 @@ airtalk_live.html demo frontend.
     python airtalk_server.py --live --variant B    # recognise live + drive the frontend
     python airtalk_server.py --live --no-frontend  # plain console --live, no websocket server
 
-Offline metrics are identical to dtw_eval.py (LOO / same-day / cross-day) and are reused
-directly from it. What's new here is --live: it now also streams every raw packet to any
-connected frontend (for the live "drawing" sketch) plus touch/char/caps events, in addition to
-printing to the console exactly like dtw_eval.py did.
+Offline metrics are identical to dtw_eval.py (LOO / same-day / cross-day, variants A-G, --mag-only,
+--mag-weight) and are reused directly from it. What's new here is --live: it now also streams every
+raw packet to any connected frontend (for the live "drawing" sketch) plus touch/char/caps events,
+in addition to printing to the console exactly like dtw_eval.py did.
+
+Websocket messages (JSON): touch_start, touch_end, clear, caps {on}, char {char}, and per packet
+imu {touched, gx, gy, gz, x, y, mx, my, mz}. mx/my/mz are the calibrated body-frame magnetic field in
+Gauss, or null when the pen has no magnetometer data or calib.json has no mag calibration.
 
 Requires `pip install websockets` for the frontend link (falls back to console-only --live
 without it, same as before).
 """
 
 import argparse
+import math
 import sys
 import time
-from collections import deque
 
 import numpy as np
 
 from airpen_common import (
     DATA_DIR,
+    MAG_VARIANTS,
+    MAG_WEIGHT,
+    VARIANTS,
     PenStream,
+    apply_mag_cal,
     build_sample,
     derive,
     features,
-    list_samples,
-    load_sample,
+    load_templates,
+    meta_has_mag,
     prepare_meta,
     vec,
 )
 
-# Reuse the offline eval + the DTW routine as-is -- no changes to that logic here.
-from dtw_eval import dtw, evaluate, HAVE_NUMBA  # noqa: F401  (HAVE_NUMBA re-exported for parity)
+# Reuse the offline eval, the DTW routine and the tap/caps timing as-is.
+from dtw_eval import (  # noqa: F401  (HAVE_NUMBA re-exported for parity)
+    DOUBLE_TAP_GAP_S,
+    HAVE_NUMBA,
+    TAP_S,
+    dtw,
+    evaluate,
+)
 
 try:
     import asyncio
@@ -67,7 +81,9 @@ class Broadcaster:
     def start(self):
         self._thread.start()
         if not self._ready.wait(5):
-            print("[frontend] websocket server didn't come up in time; continuing without it.")
+            print(
+                "[frontend] websocket server didn't come up in time; continuing without it."
+            )
 
     def _run(self):
         self.loop = asyncio.new_event_loop()
@@ -75,7 +91,9 @@ class Broadcaster:
         try:
             self.loop.run_until_complete(self._serve())
         except OSError as e:
-            print(f"[frontend] couldn't start websocket server on {self.host}:{self.port}: {e}")
+            print(
+                f"[frontend] couldn't start websocket server on {self.host}:{self.port}: {e}"
+            )
             self._ready.set()
 
     async def _serve(self):
@@ -112,102 +130,114 @@ class Broadcaster:
 
 
 # =============================================================================================
-# Packet-level capture loop.
+# Per-packet streaming to the frontend.
 #
-# PenStream.next_touch() only returns once a whole touch (down -> release) has been captured,
-# so there's no hook inside it to stream individual packets out as they arrive. This reimplements
-# the same cut logic (identical thresholds/behaviour to airpen_common.PenStream.next_touch),
-# reaching into the stream's own buffer/state, and broadcasts each packet plus a running 2D
+# PenStream.next_touch() has hooks (on_start / on_packet / on_end), so the capture logic itself
+# (thresholds, debounce, pre-touch buffer) is exactly the one dtw_eval.py / collect.py use and can't
+# drift out of sync. This class turns those hooks into websocket messages plus a running 2D
 # dead-reckoned trace (integrated gyro -> x,y) so the frontend can sketch the stroke live as it's
 # written. The trace is for visual flavour only -- it's not what the recognizer uses; DTW below
 # still runs on the same derived features as dtw_eval.py.
 # =============================================================================================
-def live_touch_with_stream(stream, broadcaster, release_ms=80.0, max_s=10.0, trace_scale=1.0):
-    cap, start, last_on = None, 0, 0
-    last_pkt = time.time()
-    tx = ty = 0.0
-    prev_t = None
+def _num(v):
+    """JSON-safe number: NaN/inf -> None (json.dumps would emit invalid `NaN`)."""
+    return float(v) if math.isfinite(v) else None
 
-    while True:
-        p = stream._read()
-        if p is None:
-            if time.time() - last_pkt > 5:
-                print("[stream] no packets for 5 s. Is the ESP32 on and on the same network?")
-                last_pkt = time.time()
-            continue
-        last_pkt = time.time()
 
-        rising = p[1] and not stream._prev_touch
-        stream._prev_touch = p[1]
+class LiveFeed:
+    def __init__(self, broadcaster, meta, trace_scale=1.0):
+        self.bc = broadcaster
+        self.meta = meta
+        self.scale = trace_scale
+        self.tx = self.ty = 0.0
+        self.prev_t = None
 
-        if cap is None:
-            stream.ring.append(p)
-            while stream.ring[-1][0] - stream.ring[0][0] > stream.pre_s:
-                stream.ring.popleft()
-            if rising:
-                cap = list(stream.ring)
-                start = last_on = len(cap) - 1
-                tx = ty = 0.0
-                prev_t = cap[start][0]
-                broadcaster.send({"type": "touch_start"})
-            continue
+    def on_start(self, p):
+        self.tx = self.ty = 0.0
+        self.prev_t = p[0]
+        self.bc.send({"type": "touch_start"})
 
-        cap.append(p)
-        t, touched, ax, ay, az, gx, gy, gz = p
-        dt = max(0.0, t - prev_t) if prev_t is not None else 0.0
-        prev_t = t
+    def on_packet(self, p):
+        t, touched, ax, ay, az, gx, gy, gz, mx, my, mz = p
+        dt = max(0.0, t - self.prev_t) if self.prev_t is not None else 0.0
+        self.prev_t = t
         if touched:
-            last_on = len(cap) - 1
-            tx += gy * dt * trace_scale
-            ty += -gx * dt * trace_scale
+            self.tx += gy * dt * self.scale
+            self.ty += -gx * dt * self.scale
+        msg = {
+            "type": "imu",
+            "touched": bool(touched),
+            "gx": gx,
+            "gy": gy,
+            "gz": gz,
+            "x": self.tx,
+            "y": self.ty,
+            "mx": None,
+            "my": None,
+            "mz": None,
+        }
+        raw = np.array([[mx, my, mz]], float)
+        if meta_has_mag(self.meta) and np.isfinite(raw).all() and np.abs(raw).max() > 0:
+            m = apply_mag_cal(
+                raw,
+                self.meta["mag_offset"],
+                self.meta["mag_scale"],
+                self.meta["mag_align"],
+            )[0]
+            msg.update(mx=_num(m[0]), my=_num(m[1]), mz=_num(m[2]))
+        self.bc.send(msg)
 
-        broadcaster.send({
-            "type": "imu", "touched": bool(touched),
-            "gx": gx, "gy": gy, "gz": gz,
-            "x": tx, "y": ty,
-        })
-
-        if p[0] - cap[last_on][0] >= release_ms / 1000 or p[0] - cap[start][0] > max_s:
-            tail = cap[-1][0]
-            stream.ring = deque(q for q in cap if q[0] >= tail - stream.pre_s)
-            broadcaster.send({"type": "touch_end"})
-            return stream._pack(cap[:last_on + 1], start)
+    def on_end(self):
+        self.bc.send({"type": "touch_end"})
 
 
 # =============================================================================================
 # Live recognition (same tap/caps/DTW logic as dtw_eval.py, plus frontend events)
 # =============================================================================================
-TAP_S = 0.25
-DOUBLE_TAP_GAP_S = 0.8
-
-
 def live(args):
     v = args.variant.upper()
-    paths = list_samples(args.data, args.user)
-    if not paths:
-        sys.exit(f"No templates in {args.data}/{args.user}. Run collect.py first.")
-    X, y = [], []
-    for p in paths:
-        s = load_sample(p)
-        d = derive(s)
-        X.append(vec(features(d, v), d["fs"], args.len))
-        y.append(s["label"])
-    X, y = np.ascontiguousarray(np.stack(X)), np.array(y)
+    if v not in VARIANTS:
+        sys.exit(f"Unknown variant '{v}'. Choose from {', '.join(VARIANTS)}.")
+    need_mag = v in MAG_VARIANTS
+    X, y, skipped = load_templates(args.data, args.user, v, args.len, args.mag_weight)
+    if X is None:
+        sys.exit(
+            f"No usable templates in {args.data}/{args.user} for variant {v}."
+            + (
+                " (variant needs samples with a calibrated magnetometer; run collect.py --calibrate-mag)"
+                if need_mag
+                else " Run collect.py first."
+            )
+        )
+    if skipped:
+        print(
+            f"note: {skipped} templates have no calibrated mag and are ignored for variant {v}."
+        )
     band = max(1, int(round(args.band * args.len)))
 
     broadcaster = None
     if not args.no_frontend:
         if not HAVE_WEBSOCKETS:
-            print("note: `pip install websockets` to drive the frontend; "
-                  "continuing with console-only live mode.")
+            print(
+                "note: `pip install websockets` to drive the frontend; "
+                "continuing with console-only live mode."
+            )
         else:
             broadcaster = Broadcaster(args.ws_host, args.ws_port)
             broadcaster.start()
-            print(f"Frontend server listening on ws://{args.ws_host}:{args.ws_port} "
-                  f"-- open airtalk_live.html, point it at that address, and connect.")
+            print(
+                f"Frontend server listening on ws://{args.ws_host}:{args.ws_port} "
+                f"-- open airtalk_live.html, point it at that address, and connect."
+            )
 
     stream = PenStream(args.port)
     meta = prepare_meta(stream, args.data, False, not args.no_rebias)
+    if need_mag and not meta_has_mag(meta):
+        sys.exit(
+            f"Variant {v} needs a magnetometer calibration, but calib.json has none. "
+            "Run `python collect.py --calibrate-mag` first."
+        )
+    feed = LiveFeed(broadcaster, meta) if broadcaster else None
     caps = False
     pending_tap_t = None
     print(
@@ -221,8 +251,13 @@ def live(args):
 
     try:
         while True:
-            if broadcaster:
-                cap = live_touch_with_stream(stream, broadcaster, release_ms=args.release_ms)
+            if feed:
+                cap = stream.next_touch(
+                    release_ms=args.release_ms,
+                    on_start=feed.on_start,
+                    on_packet=feed.on_packet,
+                    on_end=feed.on_end,
+                )
             else:
                 cap = stream.next_touch(release_ms=args.release_ms)
             now = time.monotonic()
@@ -244,8 +279,11 @@ def live(args):
 
             if cap["duration"] < 0.4:
                 continue
-            d = derive(build_sample(cap, meta))
-            x = vec(features(d, v), d["fs"], args.len)
+            d = derive(build_sample(cap, meta), use_mag=need_mag)
+            if need_mag and not d["has_mag"]:
+                print("  (no magnetometer data in this capture, skipped)")
+                continue
+            x = vec(features(d, v, args.mag_weight), d["fs"], args.len)
             dist = np.array([dtw(x, t, band) for t in X])
             ranked = sorted((dist[y == c].min(), c) for c in set(y))
             best, second = ranked[0], ranked[1] if len(ranked) > 1 else (np.inf, "-")
@@ -275,12 +313,31 @@ def main():
     )
     ap.add_argument("--len", type=int, default=100, help="resampled length")
     ap.add_argument("--live", action="store_true")
-    ap.add_argument("--variant", default="B", help="feature variant for --live")
+    ap.add_argument(
+        "--variant",
+        default="B",
+        help="feature variant for --live (A-G; E-G need the magnetometer)",
+    )
+    ap.add_argument(
+        "--mag-only",
+        action="store_true",
+        help="offline eval on only the samples that have a calibrated magnetometer (enables E-G)",
+    )
+    ap.add_argument(
+        "--mag-weight",
+        type=float,
+        default=MAG_WEIGHT,
+        help="weight of the magnetometer channels in variant E (1.0 = same as accel/gyro groups)",
+    )
     ap.add_argument("--port", type=int, default=5005, help="UDP port for the pen")
     ap.add_argument("--no-rebias", action="store_true")
     ap.add_argument("--release-ms", type=float, default=80.0)
-    ap.add_argument("--ws-host", default="0.0.0.0", help="websocket host for the frontend")
-    ap.add_argument("--ws-port", type=int, default=8765, help="websocket port for the frontend")
+    ap.add_argument(
+        "--ws-host", default="0.0.0.0", help="websocket host for the frontend"
+    )
+    ap.add_argument(
+        "--ws-port", type=int, default=8765, help="websocket port for the frontend"
+    )
     ap.add_argument(
         "--no-frontend",
         action="store_true",

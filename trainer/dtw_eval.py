@@ -4,6 +4,10 @@
     python dtw_eval.py                     # compare feature variants A-D on your collected data
     python dtw_eval.py --by session        # group by collection run instead of by day
     python dtw_eval.py --live --variant B  # recognise characters as you write them
+    python dtw_eval.py --mag-only          # evaluate A-G on just the samples that have a calibrated mag
+
+Variants A-D use only the IMU. E-G also need the calibrated magnetometer (collect.py --calibrate-mag,
+then collect samples); they are skipped automatically while any sample lacks it, unless --mag-only.
 
 Metrics per variant:
   LOO         leave-one-out 1-NN over every sample (needs no grouping)
@@ -19,6 +23,8 @@ from collections import Counter
 import numpy as np
 from airpen_common import (
     DATA_DIR,
+    MAG_VARIANTS,
+    MAG_WEIGHT,
     VARIANTS,
     PenStream,
     build_sample,
@@ -26,7 +32,10 @@ from airpen_common import (
     features,
     list_samples,
     load_sample,
+    load_templates,
+    meta_has_mag,
     prepare_meta,
+    sample_has_mag,
     vec,
 )
 
@@ -142,16 +151,38 @@ def evaluate(args):
     paths = list_samples(args.data, args.user)
     if not paths:
         sys.exit(f"No samples in {args.data}/{args.user}. Run collect.py first.")
-    feats = {v: [] for v in VARIANTS}
+    samples = [load_sample(p) for p in paths]
+    n_nomag = sum(not sample_has_mag(s) for s in samples)
+    if args.mag_only:
+        samples = [s for s in samples if sample_has_mag(s)]
+        if not samples:
+            sys.exit(
+                "--mag-only: no samples with a calibrated magnetometer. "
+                "Run collect.py --calibrate-mag and collect some."
+            )
+        print(
+            f"--mag-only: using {len(samples)} samples with mag, ignoring {n_nomag} without"
+        )
+        n_nomag = 0
+    mag_ok = n_nomag == 0
+    variants = {v: d for v, d in VARIANTS.items() if mag_ok or v not in MAG_VARIANTS}
+    if not mag_ok:
+        print(
+            f"note: {n_nomag} of {len(samples)} samples have no calibrated magnetometer data, so variants "
+            f"{'/'.join(sorted(MAG_VARIANTS))} are skipped.\n"
+            "      (use --mag-only to compare all variants on just the samples that have it)"
+        )
+
+    feats = {v: [] for v in variants}
     y, groups, bad_heading = [], [], 0
-    for p in paths:
-        s = load_sample(p)
-        d = derive(s)
+    for s in samples:
+        d = derive(s, use_mag=mag_ok)
         bad_heading += not d["heading_ok"]
-        for v in VARIANTS:
-            feats[v].append(vec(features(d, v), d["fs"], args.len))
+        for v in variants:
+            feats[v].append(vec(features(d, v, args.mag_weight), d["fs"], args.len))
         y.append(s["label"])
         groups.append(s["session"][:8] if args.by == "day" else s["session"])
+    paths = [s["path"] for s in samples]
     y, groups = np.array(y), np.array(groups)
     counts = Counter(y)
     print(
@@ -175,7 +206,7 @@ def evaluate(args):
     )
     print("\n" + head + "\n" + "-" * len(head))
     res = {}
-    for v, desc in VARIANTS.items():
+    for v, desc in variants.items():
         X = np.ascontiguousarray(np.stack(feats[v]))
         D = dist_matrix(X, band)
         acc, pred = loo(D, y)
@@ -205,25 +236,37 @@ def evaluate(args):
 # caps. A tap that isn't followed by a second one in time is just discarded as noise -- there's
 # no separate timer thread; the next incoming touch (tap or real write) resolves it.
 TAP_S = 0.25
-DOUBLE_TAP_GAP_S = 0.8
+DOUBLE_TAP_GAP_S = 0.4
 
 
 def live(args):
     v = args.variant.upper()
-    paths = list_samples(args.data, args.user)
-    if not paths:
-        sys.exit(f"No templates in {args.data}/{args.user}. Run collect.py first.")
-    X, y = [], []
-    for p in paths:
-        s = load_sample(p)
-        d = derive(s)
-        X.append(vec(features(d, v), d["fs"], args.len))
-        y.append(s["label"])
-    X, y = np.ascontiguousarray(np.stack(X)), np.array(y)
+    if v not in VARIANTS:
+        sys.exit(f"Unknown variant '{v}'. Choose from {', '.join(VARIANTS)}.")
+    need_mag = v in MAG_VARIANTS
+    X, y, skipped = load_templates(args.data, args.user, v, args.len, args.mag_weight)
+    if X is None:
+        sys.exit(
+            f"No usable templates in {args.data}/{args.user} for variant {v}."
+            + (
+                " (variant needs samples with a calibrated magnetometer; run collect.py --calibrate-mag)"
+                if need_mag
+                else " Run collect.py first."
+            )
+        )
+    if skipped:
+        print(
+            f"note: {skipped} templates have no calibrated mag and are ignored for variant {v}."
+        )
     band = max(1, int(round(args.band * args.len)))
 
     stream = PenStream(args.port)
     meta = prepare_meta(stream, args.data, False, not args.no_rebias)
+    if need_mag and not meta_has_mag(meta):
+        sys.exit(
+            f"Variant {v} needs a magnetometer calibration, but calib.json has none. "
+            "Run `python collect.py --calibrate-mag` first."
+        )
     caps = False
     pending_tap_t = None  # wall-clock time of an unresolved first tap
     print(
@@ -251,8 +294,11 @@ def live(args):
 
             if cap["duration"] < 0.4:
                 continue
-            d = derive(build_sample(cap, meta))
-            x = vec(features(d, v), d["fs"], args.len)
+            d = derive(build_sample(cap, meta), use_mag=need_mag)
+            if need_mag and not d["has_mag"]:
+                print("  (no magnetometer data in this capture, skipped)")
+                continue
+            x = vec(features(d, v, args.mag_weight), d["fs"], args.len)
             dist = np.array([dtw(x, t, band) for t in X])
             ranked = sorted((dist[y == c].min(), c) for c in set(y))
             best, second = ranked[0], ranked[1] if len(ranked) > 1 else (np.inf, "-")
@@ -280,7 +326,22 @@ def main():
     )
     ap.add_argument("--len", type=int, default=100, help="resampled length")
     ap.add_argument("--live", action="store_true")
-    ap.add_argument("--variant", default="B", help="feature variant for --live")
+    ap.add_argument(
+        "--variant",
+        default="B",
+        help="feature variant for --live (A-G; E-G need the magnetometer)",
+    )
+    ap.add_argument(
+        "--mag-only",
+        action="store_true",
+        help="evaluate on only the samples that have a calibrated magnetometer (enables E-G)",
+    )
+    ap.add_argument(
+        "--mag-weight",
+        type=float,
+        default=MAG_WEIGHT,
+        help="weight of the magnetometer channels in variant E (1.0 = same as accel/gyro groups)",
+    )
     ap.add_argument("--port", type=int, default=5005)
     ap.add_argument("--no-rebias", action="store_true")
     ap.add_argument("--release-ms", type=float, default=80.0)
