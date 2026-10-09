@@ -6,7 +6,7 @@
 <title>AirTalk Live</title>
 <style>
   :root {
-    --bg: #0d1117; --card: #161b22; --card2: #1d242d; --line: #2b3440;
+    --bg: #0d1117; --card: #161b22; --card2: #1d242d; --card3: #232c38; --line: #2b3440;
     --text: #e6edf3; --dim: #8b98a8;
     --write: #4aa8ff; --gest: #ffb020; --ok: #3ddc84; --bad: #ff5d5d;
     --accent: var(--write);
@@ -18,7 +18,6 @@
     margin: 0; background: var(--bg); color: var(--text);
     font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  /* glowing frame while in gesture mode */
   body::before {
     content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 50;
     box-shadow: inset 0 0 0 0 var(--gest); opacity: 0; transition: opacity .2s;
@@ -51,30 +50,36 @@
   #capsPill.on { color: #04140a; background: var(--ok); border-color: var(--ok); }
   .conn { display: flex; align-items: center; gap: 8px; }
   .conn input {
-    width: 210px; background: var(--card2); color: var(--text); border: 1px solid var(--line);
+    width: 190px; background: var(--card2); color: var(--text); border: 1px solid var(--line);
     border-radius: 8px; padding: 6px 10px; font: inherit;
   }
-  button {
+  button, select {
     font: inherit; color: var(--text); background: var(--card2); border: 1px solid var(--line);
     border-radius: 8px; padding: 6px 12px; cursor: pointer;
   }
-  button:hover { border-color: var(--accent); }
+  button:hover, select:hover { border-color: var(--accent); }
+  .iconbtn {
+    width: 34px; height: 34px; padding: 0; display: grid; place-items: center; font-size: 16px;
+    border-radius: 10px; position: relative;
+  }
+  .iconbtn .dirty { position: absolute; top: -3px; right: -3px; width: 9px; height: 9px;
+    border-radius: 50%; background: var(--gest); display: none; }
+  .iconbtn.dirty .dirty { display: block; }
   #connDot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); }
   #connDot.ok { background: var(--ok); }
 
   main {
     display: grid; gap: 16px; padding: 16px 20px 28px;
-    grid-template-columns: minmax(0, 1.25fr) minmax(320px, 1fr);
+    grid-template-columns: minmax(0, 1.2fr) minmax(360px, 1fr);
   }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  @media (max-width: 920px) { main { grid-template-columns: 1fr; } }
   .col { display: grid; gap: 16px; align-content: start; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
   .card h2 {
     margin: 0 0 10px; font-size: 12px; font-weight: 700; color: var(--dim);
-    text-transform: uppercase; letter-spacing: 1.2px; display: flex; justify-content: space-between;
+    text-transform: uppercase; letter-spacing: 1.2px; display: flex; justify-content: space-between; gap: 8px;
   }
 
-  /* ---- text ---- */
   #text {
     min-height: 150px; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word;
     font: 30px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace; padding: 4px 2px;
@@ -89,13 +94,12 @@
   @keyframes blink { to { visibility: hidden; } }
   .nl { color: var(--dim); font-size: .55em; vertical-align: middle; opacity: .8; }
 
-  /* ---- sketch ---- */
   .sketchwrap { position: relative; transition: opacity .2s, filter .2s; }
   body.gesture .sketchwrap { opacity: .25; filter: grayscale(1); }
-  #sketch { width: 100%; height: 260px; display: block; background: #0a0e13; border-radius: 12px; }
+  #sketch { width: 100%; height: 220px; display: block; background: #0a0e13; border-radius: 12px; }
   #big {
     position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
-    font: 700 150px/1 ui-monospace, Menlo, Consolas, monospace; color: var(--write); opacity: 0;
+    font: 700 130px/1 ui-monospace, Menlo, Consolas, monospace; color: var(--write); opacity: 0;
   }
   #big.show { animation: bigchar .9s ease-out; }
   @keyframes bigchar {
@@ -103,56 +107,44 @@
     100% { opacity: 0; transform: scale(1.15); }
   }
 
-  /* ---- gesture HUD ---- */
+  /* ---- gesture HUD: a grid of 8 cards, one per detected motion, generic/data-driven ---- */
   #hud { transition: opacity .2s, border-color .2s, box-shadow .2s; opacity: .55; position: relative; }
   body.gesture #hud { opacity: 1; border-color: var(--gest); box-shadow: 0 0 0 1px var(--gest), 0 0 30px rgba(255,176,32,.18); }
   .hint { color: var(--dim); font-size: 13px; margin: -2px 0 12px; min-height: 1.4em; }
   body.gesture .hint { color: var(--gest); font-weight: 600; }
-  .pad {
-    display: grid; gap: 8px; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(3, 84px);
-    grid-template-areas: ". up ." "left thrust right" ". down .";
-    max-width: 440px; margin: 0 auto;
+  #gcards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  @media (max-width: 1100px) and (min-width: 921px), (max-width: 480px) { #gcards { grid-template-columns: repeat(2, 1fr); } }
+  .gcard {
+    position: relative; overflow: hidden; isolation: isolate; text-align: left;
+    background: var(--card2); border: 1px solid var(--line); border-radius: 12px; padding: 9px 10px;
+    min-height: 68px; display: flex; flex-direction: column; justify-content: center;
   }
-  .key {
-    position: relative; overflow: hidden; display: grid; place-items: center; text-align: center;
-    background: var(--card2); border: 1px solid var(--line); border-radius: 14px; isolation: isolate;
-  }
-  .key::before {   /* live level: fills with the gesture score; full = detection threshold */
+  .gcard::before {
     content: ""; position: absolute; inset: 0; z-index: -1; background: var(--gest);
-    opacity: calc(var(--lvl, 0) * .6); transition: opacity .06s linear;
+    opacity: calc(var(--lvl, 0) * .55); transition: opacity .06s linear;
   }
-  .key b { display: block; font-size: 26px; line-height: 1; }
-  .key small { display: block; font-size: 10px; letter-spacing: .8px; color: var(--dim); margin-top: 4px; font-weight: 700; }
-  .key.fire { animation: fire .55s ease-out; }
-  @keyframes fire {
-    0% { background: var(--gest); transform: scale(1.08); box-shadow: 0 0 36px var(--gest); color: #1a1200; }
+  .gcard .motion { font-size: 10px; letter-spacing: .5px; color: var(--dim); font-weight: 700; text-transform: uppercase; }
+  .gcard .action { font-size: 14px; font-weight: 700; margin-top: 2px; line-height: 1.2; }
+  .gcard.unassigned .action { color: var(--dim); font-weight: 500; font-style: italic; }
+  .gcard.fire { animation: cardfire .5s ease-out; }
+  @keyframes cardfire {
+    0% { background: var(--gest); transform: scale(1.04); box-shadow: 0 0 28px var(--gest); }
     100% { transform: scale(1); }
   }
-  .key.fire small { color: inherit; }
-  .k-up { grid-area: up; } .k-down { grid-area: down; } .k-left { grid-area: left; }
-  .k-right { grid-area: right; } .k-thrust { grid-area: thrust; }
-
-  .twistrow { display: flex; align-items: center; justify-content: center; gap: 18px; margin-top: 14px; }
-  .twistrow .lbl { font-size: 12px; color: var(--dim); font-weight: 700; letter-spacing: .6px; text-align: center; width: 92px; }
-  .twistrow .lbl.fire { color: var(--gest); animation: lblfire .55s ease-out; }
-  @keyframes lblfire { 0% { transform: scale(1.3); } 100% { transform: scale(1); } }
-  #dial { width: 120px; height: 120px; }
-  #needle { transform-origin: 60px 60px; transition: transform .05s linear; }
-  #dialring { transition: stroke .1s; }
-  #dial.fireL #dialring { stroke: var(--gest); } #dial.fireR #dialring { stroke: var(--gest); }
+  .gcard.fire .motion, .gcard.fire .action { color: #1a1200; }
 
   #toast {
-    position: absolute; left: 50%; top: 46%; transform: translate(-50%, -50%) scale(.8);
-    padding: 12px 26px; border-radius: 14px; font-size: 30px; font-weight: 800; letter-spacing: 1px;
+    position: absolute; left: 50%; top: 42%; transform: translate(-50%, -50%) scale(.8);
+    padding: 12px 26px; border-radius: 14px; font-size: 26px; font-weight: 800; letter-spacing: .5px;
     color: #1a1200; background: var(--gest); box-shadow: 0 0 50px rgba(255,176,32,.7);
-    opacity: 0; pointer-events: none; white-space: nowrap; z-index: 5;
+    opacity: 0; pointer-events: none; white-space: nowrap; z-index: 5; max-width: 90%; text-align: center;
   }
   #toast.show { animation: toast 1s ease-out; }
   @keyframes toast {
     0% { opacity: 0; transform: translate(-50%, -50%) scale(.7); }
     12% { opacity: 1; transform: translate(-50%, -50%) scale(1.05); }
     70% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-    100% { opacity: 0; transform: translate(-50%, -62%) scale(1); }
+    100% { opacity: 0; transform: translate(-50%, -60%) scale(1); }
   }
 
   .dbg { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px 14px; font: 12px ui-monospace, Menlo, Consolas, monospace; color: var(--dim); }
@@ -167,9 +159,43 @@
 
   .legend { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; color: var(--dim); }
   .legend b { color: var(--text); }
-  details { margin-top: 12px; color: var(--dim); font-size: 13px; }
-  details summary { cursor: pointer; }
-  .demo { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+
+  /* ---- settings modal ---- */
+  #overlay {
+    position: fixed; inset: 0; background: rgba(5,8,12,.72); backdrop-filter: blur(2px);
+    display: none; align-items: flex-start; justify-content: center; z-index: 100; padding: 32px 16px;
+    overflow-y: auto;
+  }
+  #overlay.open { display: flex; }
+  #modal {
+    background: var(--card); border: 1px solid var(--line); border-radius: 16px; width: min(640px, 100%);
+    padding: 20px 22px 24px; box-shadow: 0 20px 60px rgba(0,0,0,.5);
+  }
+  #modal h2 { margin: 0; font-size: 18px; }
+  #modal .sub { color: var(--dim); font-size: 13px; margin: 4px 0 18px; }
+  #modal h3 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim);
+    margin: 20px 0 10px; border-top: 1px solid var(--line); padding-top: 16px;
+  }
+  #modal h3:first-of-type { border-top: 0; padding-top: 0; }
+  .modalhead { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .maprow {
+    display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 7px 0;
+  }
+  .maprow .gname { font-size: 13px; display: flex; align-items: center; gap: 8px; }
+  .maprow .gname .ic { width: 22px; text-align: center; color: var(--dim); }
+  .maprow select { min-width: 168px; }
+  .thresh { padding: 8px 0; }
+  .thresh .row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 13px; }
+  .thresh .row .val { color: var(--accent2, var(--dim)); font: 12px ui-monospace, Menlo, Consolas, monospace; color: var(--dim); }
+  .thresh input[type="range"] { width: 100%; margin-top: 6px; accent-color: var(--gest); }
+  .thresh .note { font-size: 11px; color: var(--dim); margin-top: 2px; }
+  .checkrow { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; font-size: 13px; }
+  .checkrow input { accent-color: var(--gest); width: 16px; height: 16px; }
+  .modalfoot { display: flex; justify-content: space-between; gap: 10px; margin-top: 22px; }
+  .modalfoot .right { display: flex; gap: 8px; }
+  #applyNote { font-size: 12px; color: var(--ok); opacity: 0; transition: opacity .25s; align-self: center; }
+  #applyNote.show { opacity: 1; }
 
   @media (prefers-reduced-motion: reduce) {
     body.gesture::before, #modePill.gesture, .caret { animation: none !important; }
@@ -180,8 +206,11 @@
 <header>
   <h1>Air<span>Talk</span> Live</h1>
   <span class="pill write" id="modePill"><span class="dot"></span><span id="modeTxt">WRITE MODE</span></span>
-  <span class="pill" id="capsPill" title="Flick up = UPPERCASE, flick down = lowercase">abc</span>
+  <span class="pill" id="capsPill" title="case state">abc</span>
   <span class="grow"></span>
+  <button class="iconbtn" id="settingsBtn" title="Remap gestures & thresholds" aria-label="Settings">
+    <span id="gearIcon">&#9881;&#65039;</span><span class="dirty"></span>
+  </button>
   <div class="conn">
     <span id="connDot"></span><span id="connTxt" style="color:var(--dim)">disconnected</span>
     <input id="wsUrl" spellcheck="false" aria-label="WebSocket address">
@@ -198,8 +227,15 @@
     <section class="card">
       <h2><span>Air sketch</span><span>write a character, then release</span></h2>
       <div class="sketchwrap">
-        <canvas id="sketch" width="900" height="520"></canvas>
+        <canvas id="sketch" width="900" height="460"></canvas>
         <div id="big"></div>
+      </div>
+    </section>
+    <section class="card">
+      <h2><span>How it works</span></h2>
+      <div class="legend" id="legend">
+        <b>Write</b><span>touch, draw a character, release</span>
+        <b>Gesture mode</b><span>tap, release, touch again quickly and hold; release to leave</span>
       </div>
     </section>
   </div>
@@ -208,24 +244,7 @@
     <section class="card" id="hud">
       <h2><span>Gesture mode</span><span id="gstate"></span></h2>
       <div class="hint" id="hint">Tap, release, then touch again quickly and <b>hold</b> to enter gesture mode.</div>
-      <div class="pad">
-        <div class="key k-up" id="k-up"><div><b>&#8593;</b><small>UPPERCASE</small></div></div>
-        <div class="key k-left" id="k-left"><div><b>&#8592;</b><small>BACKSPACE</small></div></div>
-        <div class="key k-thrust" id="k-thrust"><div><b>&#9166;</b><small>ENTER &middot; THRUST</small></div></div>
-        <div class="key k-right" id="k-right"><div><b>&#8594;</b><small>SPACE</small></div></div>
-        <div class="key k-down" id="k-down"><div><b>&#8595;</b><small>lowercase</small></div></div>
-      </div>
-      <div class="twistrow">
-        <div class="lbl" id="lbl-ccw">&#8634; TWIST LEFT<br>cursor back</div>
-        <svg id="dial" viewBox="0 0 120 120" aria-hidden="true">
-          <circle id="dialring" cx="60" cy="60" r="50" fill="none" stroke="#2b3440" stroke-width="6"/>
-          <path d="M60 10 A50 50 0 0 1 100 30" fill="none" stroke="#3a4656" stroke-width="3" stroke-linecap="round" opacity=".7"/>
-          <path d="M60 10 A50 50 0 0 0 20 30" fill="none" stroke="#3a4656" stroke-width="3" stroke-linecap="round" opacity=".7"/>
-          <g id="needle"><line x1="60" y1="60" x2="60" y2="18" stroke="var(--gest)" stroke-width="5" stroke-linecap="round"/>
-            <circle cx="60" cy="60" r="6" fill="var(--gest)"/></g>
-        </svg>
-        <div class="lbl" id="lbl-cw">TWIST RIGHT &#8635;<br>cursor forward</div>
-      </div>
+      <div id="gcards"></div>
       <div class="dbg">
         <span id="state">idle</span>
         <span>up/down <i id="d-ud">0.00</i></span>
@@ -236,39 +255,85 @@
       <ul id="log"></ul>
       <div id="toast"></div>
     </section>
-
-    <section class="card">
-      <h2><span>How it works</span></h2>
-      <div class="legend">
-        <b>Write</b><span>touch, draw a character, release</span>
-        <b>Gesture mode</b><span>tap, release, touch again quickly and hold; release to leave</span>
-        <b>Flick &#8593; / &#8595;</b><span>uppercase / lowercase (sets, doesn't toggle)</span>
-        <b>Flick &#8592; / &#8594;</b><span>backspace / space</span>
-        <b>Thrust forward</b><span>Enter</span>
-        <b>Twist</b><span>anticlockwise = cursor back, clockwise = cursor forward</span>
-      </div>
-      <details>
-        <summary>Demo without the pen</summary>
-        <div class="demo" id="demo"></div>
-      </details>
-    </section>
   </div>
 </main>
+
+<div id="overlay" aria-hidden="true">
+  <div id="modal" role="dialog" aria-label="Gesture settings">
+    <div class="modalhead">
+      <div>
+        <h2>Gesture settings</h2>
+        <div class="sub">Changes apply live to every connected device &mdash; no restart. Saved on this browser too.</div>
+      </div>
+      <button class="iconbtn" id="closeBtn" aria-label="Close">&times;</button>
+    </div>
+
+    <h3>Remap: which motion does what</h3>
+    <div id="mapRows"></div>
+
+    <h3>Sensitivity</h3>
+    <div id="threshRows"></div>
+
+    <h3>Orientation</h3>
+    <div class="checkrow"><span>Flip up / down</span><input type="checkbox" id="chkFlipUD"></div>
+    <div class="checkrow"><span>Flip left / right</span><input type="checkbox" id="chkFlipLR"></div>
+    <div class="checkrow"><span>Reverse twist direction (cursor moves the wrong way)</span><input type="checkbox" id="chkTwistSign"></div>
+
+    <div class="modalfoot">
+      <button id="resetBtn">Reset to defaults</button>
+      <div class="right">
+        <span id="applyNote">applied &#10003;</span>
+        <button id="doneBtn">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
 
+// ------------------------------------------------------------------ constants
+// Icons are purely cosmetic and keyed by the server's gesture ids, which are stable; everything a
+// client can actually change (labels, which ids exist, what they mean) comes from the server's
+// `config` message so this page never hardcodes the mapping or the available actions.
+const G_ICON = {
+  flick_up: "\u2191", flick_down: "\u2193", flick_left: "\u2190", flick_right: "\u2192",
+  thrust_fwd: "\u2197", thrust_back: "\u2199", twist_cw: "\u21bb", twist_ccw: "\u21ba",
+};
+const G_ORDER = ["flick_up", "flick_down", "flick_left", "flick_right",
+                  "thrust_fwd", "thrust_back", "twist_ccw", "twist_cw"];
+// Mirrors the server's defaults (Config / THRESHOLD_FIELDS / DEFAULT_MAPPING in airtalk_server.py).
+// Only used for the "Reset to defaults" button and as a fallback before the first `config` arrives;
+// the server's own `config` message is always the source of truth once connected.
+const DEFAULT_THRESHOLDS = {
+  flick_dps: 250, thrust_g: 0.6, twist_deg: 40, twist_min_dps: 70,
+  gesture_gap: 0.4, gesture_confirm: 0.15, twist_sign: 1, flip_ud: false, flip_lr: false,
+};
+const DEFAULT_MAPPING = {
+  flick_up: "uppercase", flick_down: "lowercase", flick_left: "backspace", flick_right: "space",
+  thrust_fwd: "enter", thrust_back: "caps_toggle", twist_ccw: "cursor_back", twist_cw: "cursor_fwd",
+};
+const THRESH_UI = [
+  { id: "flick_dps", label: "Flick speed", unit: "dps", min: 50, max: 600, step: 5,
+    note: "Lower = easier to trigger a flick, but more accidental fires." },
+  { id: "thrust_g", label: "Thrust strength", unit: "g", min: 0.15, max: 2.0, step: 0.05,
+    note: "Lower = a gentler push/pull counts as a thrust." },
+  { id: "twist_deg", label: "Twist step size", unit: "\u00b0/step", min: 10, max: 120, step: 5,
+    note: "Degrees of rotation per cursor step." },
+  { id: "twist_min_dps", label: "Twist min speed", unit: "dps", min: 20, max: 300, step: 5,
+    note: "Twists slower than this are ignored (keeps the slow untwist from counting)." },
+  { id: "gesture_gap", label: "Gesture entry gap", unit: "s", min: 0.1, max: 2.0, step: 0.05,
+    note: "Max time between the tap and the hold that enters gesture mode." },
+  { id: "gesture_confirm", label: "Gesture hold confirm", unit: "s", min: 0.05, max: 1.0, step: 0.01,
+    note: "How long the hold must last before gesture mode actually starts." },
+];
+
 // ------------------------------------------------------------------ state
-const S = { text: "", cursor: 0, caps: false, mode: "write", ws: null, wantConn: false, retry: null };
-const GEST = {
-  flick_up:    { key: "k-up",     label: "\u2191 UPPERCASE" },
-  flick_down:  { key: "k-down",   label: "\u2193 lowercase" },
-  flick_left:  { key: "k-left",   label: "\u2190 BACKSPACE" },
-  flick_right: { key: "k-right",  label: "\u2192 SPACE" },
-  thrust:      { key: "k-thrust", label: "\u23ce ENTER" },
-  twist_ccw:   { key: null, lbl: "lbl-ccw", dial: "fireL", label: "\u21ba CURSOR BACK" },
-  twist_cw:    { key: null, lbl: "lbl-cw",  dial: "fireR", label: "\u21bb CURSOR FORWARD" },
+const S = {
+  text: "", cursor: 0, caps: false, mode: "write", ws: null, wantConn: false, retry: null,
+  config: { thresholds: { ...DEFAULT_THRESHOLDS }, mapping: { ...DEFAULT_MAPPING }, gestures: {}, actions: {} },
+  restoredThisConnection: false,
 };
 
 // ------------------------------------------------------------------ text view
@@ -298,7 +363,6 @@ function renderText() {
     el.appendChild(ph);
   }
   $("cursorInfo").textContent = S.text ? `cursor ${c}/${S.text.length}` : "";
-  caret.scrollIntoView && caret.scrollIntoView({ block: "nearest" });
 }
 function nudgeCaret() {
   const c = $("caret"); if (!c) return;
@@ -313,7 +377,7 @@ function setMode(m) {
   $("modePill").className = "pill " + S.mode;
   $("modeTxt").textContent = g ? "GESTURE MODE" : "WRITE MODE";
   $("hint").innerHTML = g
-    ? "Gestures active &mdash; flick, thrust or twist. <b>Release to go back to writing.</b>"
+    ? "Gestures active &mdash; move the pen. <b>Release to go back to writing.</b>"
     : "Tap, release, then touch again quickly and <b>hold</b> to enter gesture mode.";
   $("gstate").textContent = g ? "ACTIVE" : "";
   if (!g) resetGauges();
@@ -324,22 +388,44 @@ function setCaps(on) {
   $("capsPill").textContent = S.caps ? "ABC" : "abc";
 }
 
-// ------------------------------------------------------------------ gesture visuals
-const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
-function setLvl(id, v) { $(id).style.setProperty("--lvl", clamp(v / 1.2, 0, 1).toFixed(3)); }
+// ------------------------------------------------------------------ gesture cards (built from config)
+function actionLabel(id) { return (S.config.actions && S.config.actions[id]) || id; }
+function gestureLabel(id) { return (S.config.gestures && S.config.gestures[id]) || id; }
+
+function renderCards() {
+  const wrap = $("gcards");
+  wrap.textContent = "";
+  G_ORDER.forEach((gid) => {
+    const action = S.config.mapping[gid] || "none";
+    const card = document.createElement("div");
+    card.className = "gcard" + (action === "none" ? " unassigned" : "");
+    card.id = "gc-" + gid;
+    card.style.setProperty("--lvl", "0");
+    const motion = document.createElement("div");
+    motion.className = "motion";
+    motion.textContent = (G_ICON[gid] || "") + " " + (gestureLabel(gid).replace(/\s*\(.*\)/, ""));
+    const act = document.createElement("div");
+    act.className = "action"; act.id = "gc-" + gid + "-action";
+    act.textContent = actionLabel(action);
+    card.appendChild(motion); card.appendChild(act);
+    wrap.appendChild(card);
+  });
+}
+function setLvl(gid, v) {
+  const el = $("gc-" + gid); if (el) el.style.setProperty("--lvl", Math.min(1, Math.max(0, v)).toFixed(3));
+}
 function resetGauges() {
-  ["k-up", "k-down", "k-left", "k-right", "k-thrust"].forEach((k) => setLvl(k, 0));
-  $("needle").style.transform = "rotate(0deg)";
+  G_ORDER.forEach((g) => setLvl(g, 0));
   $("state").textContent = "idle"; $("state").className = "";
   ["d-ud", "d-lr", "d-fw"].forEach((i) => ($(i).textContent = "0.00"));
   $("d-tw").textContent = "0.0\u00b0";
 }
 function updateGauges(m) {
-  setLvl("k-up", m.ud); setLvl("k-down", -m.ud);
-  setLvl("k-right", m.lr); setLvl("k-left", -m.lr);
-  setLvl("k-thrust", m.fw);
-  const frac = clamp(m.tw_deg / (m.tw_step || 40), -1, 1);
-  $("needle").style.transform = `rotate(${(frac * 60).toFixed(1)}deg)`;
+  setLvl("flick_up", m.ud / 1.2); setLvl("flick_down", -m.ud / 1.2);
+  setLvl("flick_right", m.lr / 1.2); setLvl("flick_left", -m.lr / 1.2);
+  setLvl("thrust_fwd", m.fw / 1.2); setLvl("thrust_back", -m.fw / 1.2);
+  const frac = Math.max(-1, Math.min(1, m.tw_deg / (m.tw_step || 40)));
+  setLvl("twist_cw", Math.max(0, frac)); setLvl("twist_ccw", Math.max(0, -frac));
   $("d-ud").textContent = m.ud.toFixed(2);
   $("d-lr").textContent = m.lr.toFixed(2);
   $("d-fw").textContent = m.fw.toFixed(2);
@@ -349,20 +435,17 @@ function updateGauges(m) {
   st.className = m.state;
 }
 function retrigger(el, cls) { el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); }
-function fire(name, label) {
-  const g = GEST[name]; if (!g) return;
-  if (g.key) retrigger($(g.key), "fire");
-  if (g.lbl) {
-    retrigger($(g.lbl), "fire");
-    const d = $("dial"); d.classList.add(g.dial); setTimeout(() => d.classList.remove(g.dial), 350);
-  }
-  const t = $("toast"); t.textContent = label || g.label; retrigger(t, "show");
+function fireGesture(m) {
+  const card = $("gc-" + m.name);
+  if (card) retrigger(card, "fire");
+  const label = (m.action_label && m.action !== "none") ? m.action_label : "(unassigned \u2014 no action)";
+  const t = $("toast"); t.textContent = `${m.gesture_label || m.name} \u2192 ${label}`; retrigger(t, "show");
   const li = document.createElement("li");
   const when = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  li.innerHTML = `<span></span><span>${when}</span>`; li.firstChild.textContent = label || g.label;
+  li.innerHTML = `<span></span><span>${when}</span>`; li.firstChild.textContent = `${m.gesture_label || m.name} \u2192 ${label}`;
   const log = $("log"); log.insertBefore(li, log.firstChild);
   while (log.children.length > 5) log.removeChild(log.lastChild);
-  if (name === "twist_ccw" || name === "twist_cw") nudgeCaret();
+  if (m.action === "cursor_back" || m.action === "cursor_fwd") nudgeCaret();
 }
 
 // ------------------------------------------------------------------ air sketch
@@ -383,18 +466,126 @@ function drawSketch() {
   pts.forEach(([x, y], i) => (i ? cx.lineTo(x * k + ox, y * k + oy) : cx.moveTo(x * k + ox, y * k + oy)));
   cx.stroke(); cx.shadowBlur = 0;
 }
-function flashChar(ch) {
-  const b = $("big"); b.textContent = ch; retrigger(b, "show");
+function flashChar(ch) { const b = $("big"); b.textContent = ch; retrigger(b, "show"); }
+
+// ------------------------------------------------------------------ settings modal
+let pending = null;        // local draft while the modal is open, merged with S.config on every "config"
+let sendTimer = null;
+
+function openSettings() {
+  pending = { thresholds: { ...S.config.thresholds }, mapping: { ...S.config.mapping } };
+  buildMapRows(); buildThreshRows();
+  $("chkFlipUD").checked = !!pending.thresholds.flip_ud;
+  $("chkFlipLR").checked = !!pending.thresholds.flip_lr;
+  $("chkTwistSign").checked = pending.thresholds.twist_sign < 0;
+  $("overlay").classList.add("open");
+  $("settingsBtn").classList.remove("dirty");
 }
+function closeSettings() { $("overlay").classList.remove("open"); pending = null; }
+
+function buildMapRows() {
+  const wrap = $("mapRows"); wrap.textContent = "";
+  const actionIds = Object.keys(S.config.actions || {});
+  G_ORDER.forEach((gid) => {
+    const row = document.createElement("div"); row.className = "maprow";
+    const name = document.createElement("div"); name.className = "gname";
+    name.innerHTML = `<span class="ic">${G_ICON[gid] || ""}</span><span>${gestureLabel(gid)}</span>`;
+    const sel = document.createElement("select"); sel.id = "sel-" + gid;
+    actionIds.forEach((aid) => {
+      const opt = document.createElement("option");
+      opt.value = aid; opt.textContent = actionLabel(aid);
+      if (aid === (pending.mapping[gid] || "none")) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.addEventListener("change", () => { pending.mapping[gid] = sel.value; scheduleSend(); });
+    row.appendChild(name); row.appendChild(sel);
+    wrap.appendChild(row);
+  });
+}
+function buildThreshRows() {
+  const wrap = $("threshRows"); wrap.textContent = "";
+  THRESH_UI.forEach((t) => {
+    const box = document.createElement("div"); box.className = "thresh";
+    const row = document.createElement("div"); row.className = "row";
+    const lab = document.createElement("span"); lab.textContent = t.label;
+    const val = document.createElement("span"); val.className = "val"; val.id = "val-" + t.id;
+    row.appendChild(lab); row.appendChild(val);
+    const inp = document.createElement("input");
+    inp.type = "range"; inp.min = t.min; inp.max = t.max; inp.step = t.step; inp.id = "sl-" + t.id;
+    inp.value = pending.thresholds[t.id] ?? t.min;
+    const note = document.createElement("div"); note.className = "note"; note.textContent = t.note;
+    const show = () => { val.textContent = Number(inp.value).toFixed(t.step < 1 ? 2 : 0) + " " + t.unit; };
+    show();
+    inp.addEventListener("input", () => {
+      pending.thresholds[t.id] = Number(inp.value); show(); scheduleSend();
+    });
+    box.appendChild(row); box.appendChild(inp); box.appendChild(note);
+    wrap.appendChild(box);
+  });
+}
+function scheduleSend() {
+  clearTimeout(sendTimer);
+  sendTimer = setTimeout(sendPending, 150);
+}
+function sendPending() {
+  if (!pending) return;
+  sendConfig({ thresholds: pending.thresholds, mapping: pending.mapping });
+}
+function sendConfig(cfg) {
+  if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify({ type: "config_set", ...cfg }));
+  try { localStorage.setItem("airtalk_gesture_config", JSON.stringify(cfg)); } catch (e) {}
+}
+function flashApplied() { const n = $("applyNote"); retrigger(n, "show"); }
+
+$("settingsBtn").onclick = openSettings;
+$("closeBtn").onclick = closeSettings;
+$("doneBtn").onclick = closeSettings;
+$("overlay").addEventListener("click", (e) => { if (e.target === $("overlay")) closeSettings(); });
+$("chkFlipUD").addEventListener("change", (e) => { pending.thresholds.flip_ud = e.target.checked; scheduleSend(); });
+$("chkFlipLR").addEventListener("change", (e) => { pending.thresholds.flip_lr = e.target.checked; scheduleSend(); });
+$("chkTwistSign").addEventListener("change", (e) => { pending.thresholds.twist_sign = e.target.checked ? -1 : 1; scheduleSend(); });
+$("resetBtn").onclick = () => {
+  pending = { thresholds: { ...DEFAULT_THRESHOLDS }, mapping: { ...DEFAULT_MAPPING } };
+  buildMapRows(); buildThreshRows();
+  $("chkFlipUD").checked = false; $("chkFlipLR").checked = false; $("chkTwistSign").checked = false;
+  sendPending();
+};
 
 // ------------------------------------------------------------------ message handling
+function applyConfig(m) {
+  S.config = { thresholds: m.thresholds, mapping: m.mapping, gestures: m.gestures, actions: m.actions };
+  renderCards();
+  if ($("overlay").classList.contains("open")) {
+    // a change from elsewhere (another tab/device) arrived while the panel is open; refresh it,
+    // but don't clobber a field the user is mid-drag on by only rebuilding when nothing pending.
+    if (!sendTimer) { pending = { thresholds: { ...m.thresholds }, mapping: { ...m.mapping } }; buildMapRows(); buildThreshRows(); }
+  } else {
+    $("settingsBtn").classList.remove("dirty");
+  }
+  flashApplied();
+  if (!S.restoredThisConnection) {
+    S.restoredThisConnection = true;
+    // Read the PREVIOUSLY saved draft before writing anything -- this is the one chance to tell
+    // "a fresh server, still on defaults" from "a server that already has my prefs", and writing
+    // the just-received (unrestored) config to localStorage first would destroy that draft before
+    // it's ever read.
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem("airtalk_gesture_config")); } catch (e) {}
+    if (saved && saved.thresholds && saved.mapping) {
+      sendConfig(saved);  // bring your remap to the fresh server; its echo will persist it below
+      return;
+    }
+  }
+  try { localStorage.setItem("airtalk_gesture_config", JSON.stringify({ thresholds: m.thresholds, mapping: m.mapping })); } catch (e) {}
+}
 function handle(m) {
   switch (m.type) {
+    case "config": applyConfig(m); break;
     case "text": S.text = m.text; S.cursor = m.cursor; renderText(); break;
     case "caps": setCaps(m.on); break;
     case "mode": setMode(m.mode); break;
     case "gest": if (S.mode === "gesture") updateGauges(m); break;
-    case "gesture": fire(m.name, m.label); break;
+    case "gesture": fireGesture(m); break;
     case "char": flashChar(m.char); break;
     case "touch_start": pts = []; drawSketch(); break;
     case "imu": if (m.touched) { pts.push([m.x, m.y]); drawSketch(); } break;
@@ -415,7 +606,7 @@ function connect() {
   try { localStorage.setItem("airtalk_ws", url); } catch (e) {}
   let ws;
   try { ws = new WebSocket(url); } catch (e) { setConn(false, "bad address"); return; }
-  S.ws = ws; setConn(false, "connecting\u2026");
+  S.ws = ws; S.restoredThisConnection = false; setConn(false, "connecting\u2026");
   ws.onopen = () => setConn(true, "connected");
   ws.onmessage = (ev) => { try { handle(JSON.parse(ev.data)); } catch (e) { console.error(e); } };
   ws.onclose = () => {
@@ -432,39 +623,12 @@ $("connBtn").onclick = () => {
   else { clearTimeout(S.retry); if (S.ws) S.ws.close(); setConn(false, "disconnected"); }
 };
 
-// ------------------------------------------------------------------ demo (no pen needed)
-// Mirrors what the server does, so the visuals can be tried offline.
-function demoApply(name) {
-  const ins = (s) => { S.text = S.text.slice(0, S.cursor) + s + S.text.slice(S.cursor); S.cursor += s.length; };
-  if (name === "flick_up") setCaps(true);
-  else if (name === "flick_down") setCaps(false);
-  else if (name === "flick_left") { if (S.cursor > 0) { S.text = S.text.slice(0, S.cursor - 1) + S.text.slice(S.cursor); S.cursor--; } }
-  else if (name === "flick_right") ins(" ");
-  else if (name === "thrust") ins("\n");
-  else if (name === "twist_ccw") S.cursor = Math.max(0, S.cursor - 1);
-  else if (name === "twist_cw") S.cursor = Math.min(S.text.length, S.cursor + 1);
-  renderText();
-}
-function buildDemo() {
-  const d = $("demo");
-  const add = (txt, fn) => { const b = document.createElement("button"); b.textContent = txt; b.onclick = fn; d.appendChild(b); };
-  add("enter/leave gesture mode", () => setMode(S.mode === "gesture" ? "write" : "gesture"));
-  add("type a", () => { if (!(S.ws && S.ws.readyState === 1)) { const ch = S.caps ? "A" : "a"; S.text = S.text.slice(0, S.cursor) + ch + S.text.slice(S.cursor); S.cursor++; renderText(); flashChar(ch); } });
-  Object.keys(GEST).forEach((n) => add(GEST[n].label, () => {
-    if (S.ws && S.ws.readyState === 1) return;   // don't fight a live server
-    if (S.mode !== "gesture") setMode("gesture");
-    fire(n); demoApply(n);
-    handle({ type: "gest", ud: n === "flick_up" ? 1.4 : n === "flick_down" ? -1.4 : 0, lr: n === "flick_right" ? 1.4 : n === "flick_left" ? -1.4 : 0,
-             fw: n === "thrust" ? 1.3 : 0, tw: 0, tw_deg: n === "twist_cw" ? 30 : n === "twist_ccw" ? -30 : 0, tw_step: 40, state: "lockout" });
-  }));
-}
-
 // ------------------------------------------------------------------ init
 (function init() {
   let saved = null; try { saved = localStorage.getItem("airtalk_ws"); } catch (e) {}
   const host = location.hostname && location.protocol.startsWith("http") ? location.hostname : "localhost";
   $("wsUrl").value = saved || `ws://${host}:8765`;
-  buildDemo(); setMode("write"); setCaps(false); renderText(); drawSketch(); resetGauges();
+  renderCards(); setMode("write"); setCaps(false); renderText(); drawSketch(); resetGauges();
   S.wantConn = true; connect();     // auto-connect; the button toggles it
 })();
 </script>

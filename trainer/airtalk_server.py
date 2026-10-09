@@ -19,14 +19,17 @@ Offline metrics are identical to dtw_eval.py (LOO / same-day / cross-day, varian
                         --gesture-confirm). You stay in gesture mode until you let go, and can do
                         as many gestures as you like during that one hold:
 
-      flick up      -> UPPERCASE on           flick left   -> backspace (delete char before cursor)
-      flick down    -> lowercase on           flick right  -> insert a space
-      thrust forward-> Enter (newline)
-      twist anticlockwise -> cursor back      twist clockwise -> cursor forward   (a step per
-                                                --twist-deg degrees, so a long twist moves several)
+      8 raw motions are detected: flick up/down/left/right, twist clockwise/anticlockwise, thrust
+      forward/backward. Which action each one performs is a REMAPPABLE table, edited live from the
+      frontend's settings panel (gear icon) -- nothing to pass on the command line for that. The
+      shipped default (same behaviour as before remapping existed):
 
-  Up/down only SET the case (flicking up twice is the same as once). Case applies to the characters
-  typed afterwards. This replaces the old double-tap caps toggle.
+      flick up -> UPPERCASE (set)      flick left  -> backspace          twist ccw -> cursor back
+      flick down -> lowercase (set)    flick right -> space              twist cw  -> cursor forward
+      thrust forward -> Enter          thrust backward -> toggle case
+
+  "Set" actions (UPPERCASE/lowercase) only ever set the state, not toggle it -- flicking up twice
+  does nothing the second time. "Toggle case" flips whatever the current state is.
 
 Gesture detection is deliberately simple and tunable (everything is a flag): rates are measured in a
 pen-relative frame built from gravity and the calibrated pen axis -- "forward" is where the tip
@@ -34,7 +37,14 @@ points, "up" is world up -- so it works at any wrist angle. After each gesture t
 lock-out (until the pen is quiet again) so the return stroke of a flick isn't read as the opposite
 gesture; twists likewise ignore the untwist for ~0.5 s. First time on real hardware, watch the
 live gesture gauges in the frontend and check the signs (--flip-ud / --flip-lr / --twist-sign) and
-thresholds (--flick-dps / --thrust-g / --twist-min-dps).
+thresholds (--flick-dps / --thrust-g / --twist-min-dps) -- or, easier, open the settings panel in
+the frontend: every threshold and the whole action mapping can be changed live from there, for
+any connected client, with no restart (see "live config" below).
+
+Live config: the gesture->action mapping and every threshold live in a Config object on the server,
+not just in argparse. The CLI flags below only set the STARTING values. Any connected frontend can
+change them at any time (settings panel, gear icon); the change applies immediately to every
+connected client and to detection on the next packet -- no restart, no reconnect.
 
 Websocket messages (JSON), server -> frontend:
   touch_start, touch_end, clear, caps {on}, char {char},
@@ -43,10 +53,23 @@ Websocket messages (JSON), server -> frontend:
   mode {mode: "write"|"gesture"}
   gest {ud, lr, fw, tw, tw_deg, tw_step, state}  (GESTURE mode, every packet: live gesture scores,
                                                   1.0 = detection threshold; ud>0 = up, lr>0 = right,
-                                                  fw>0 = forward, tw>0 = clockwise)
-  gesture {name, label, score}                   (a gesture fired)
+                                                  fw>0 = forward (negative = backward), tw>0 = cw)
+  gesture {name, action, gesture_label, action_label, score}  (a raw motion fired and was resolved
+                                                  through the current mapping to an action)
   text {text, cursor}                            (authoritative text buffer; sent after every change
-                                                  and, with caps/mode, to each newly connected client)
+                                                  and, with caps/mode/config, to each newly connected
+                                                  client)
+  config {thresholds, mapping, gestures, actions} (the full live config: `gestures` and `actions` are
+                                                  {id: label} dictionaries the frontend builds its
+                                                  settings panel from, so the two stay in sync without
+                                                  hardcoding the list twice; sent on connect and after
+                                                  every change, to every client)
+
+Websocket messages (JSON), frontend -> server (new: the socket used to be send-only):
+  config_set {thresholds?, mapping?}   partial update; unknown keys/ids are ignored, numeric fields
+                                        are clamped to a sane range server-side. The server always
+                                        answers (to everyone) with the resulting full `config`, so a
+                                        client never has to guess whether its change stuck.
 
 Requires `pip install websockets` for the frontend link (falls back to console-only --live
 without it).
@@ -97,9 +120,12 @@ except ImportError:
 # =============================================================================================
 # WebSocket broadcaster -- runs its own asyncio loop on a background thread, so the existing
 # synchronous PenStream loop doesn't need to change shape. `send()` is safe to call from the
-# main thread at any point. `snapshot` (optional callable -> list of messages) is sent to every
-# client right after it connects, so a page opened/reloaded mid-session shows the current text,
-# case and mode.
+# main thread (or from inside `on_message`) at any point. `snapshot` (optional callable -> list of
+# messages) is sent to every client right after it connects, so a page opened/reloaded mid-session
+# shows the current text, case, mode and config. `on_message` (optional callable(dict)), if set, is
+# called -- on the broadcaster's own background thread -- for every JSON object a client sends;
+# exceptions and non-dict/invalid-JSON payloads are swallowed so one bad client can't take the
+# server down.
 # =============================================================================================
 class Broadcaster:
     def __init__(self, host="0.0.0.0", port=8765):
@@ -108,6 +134,7 @@ class Broadcaster:
         self.clients = set()
         self.loop = None
         self.snapshot = None
+        self.on_message = None
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -136,8 +163,18 @@ class Broadcaster:
                 if self.snapshot:
                     for m in self.snapshot():
                         await ws.send(json.dumps(m))
-                async for _msg in ws:
-                    pass  # frontend doesn't send anything back; just keep the socket open
+                async for raw in ws:
+                    if not self.on_message:
+                        continue
+                    try:
+                        msg = json.loads(raw)
+                    except (ValueError, TypeError):
+                        continue
+                    if isinstance(msg, dict):
+                        try:
+                            self.on_message(msg)
+                        except Exception as e:
+                            print(f"[frontend] bad message from client, ignored: {e}")
             except Exception:
                 pass
             finally:
@@ -171,6 +208,7 @@ class NoBroadcaster:
     """Stand-in when there is no frontend, so the rest of the code never has to check."""
 
     snapshot = None
+    on_message = None
 
     def send(self, msg):
         pass
@@ -212,17 +250,113 @@ class Typist:
 
 
 # =============================================================================================
-# Gesture detector
+# Gesture <-> action mapping (remappable, live, from the frontend's settings panel)
+#
+# GESTURE_META / ACTION_META are the catalogue of raw motions and of things they can do -- sent to
+# every client as part of `config` so the settings panel is built from this one list and can't drift
+# out of sync with what the server actually understands. DEFAULT_MAPPING is only the starting point;
+# the live mapping lives in `Config.mapping` and is changed by `config_set` messages.
 # =============================================================================================
-GESTURE_LABELS = {
-    "flick_up": "UPPERCASE",
-    "flick_down": "lowercase",
-    "flick_left": "BACKSPACE",
-    "flick_right": "SPACE",
-    "thrust": "ENTER",
-    "twist_ccw": "CURSOR \u2190",
-    "twist_cw": "CURSOR \u2192",
+GESTURE_META = {
+    "flick_up": "Flick \u2191 (tip up)",
+    "flick_down": "Flick \u2193 (tip down)",
+    "flick_left": "Flick \u2190 (tip left)",
+    "flick_right": "Flick \u2192 (tip right)",
+    "thrust_fwd": "Thrust forward",
+    "thrust_back": "Thrust backward (pull in)",
+    "twist_cw": "Twist clockwise \u21bb",
+    "twist_ccw": "Twist anticlockwise \u21ba",
 }
+ACTION_META = {
+    "none": "\u2014 (unassigned)",
+    "backspace": "Backspace",
+    "space": "Space",
+    "enter": "Enter",
+    "uppercase": "UPPERCASE (set)",
+    "lowercase": "lowercase (set)",
+    "caps_toggle": "Toggle case",
+    "cursor_back": "Cursor \u2190 (back)",
+    "cursor_fwd": "Cursor \u2192 (forward)",
+}
+DEFAULT_MAPPING = {
+    "flick_up": "uppercase",
+    "flick_down": "lowercase",
+    "flick_left": "backspace",
+    "flick_right": "space",
+    "thrust_fwd": "enter",
+    "thrust_back": "caps_toggle",
+    "twist_ccw": "cursor_back",
+    "twist_cw": "cursor_fwd",
+}
+# (name, min, max, cast) -- the thresholds a client is allowed to change, and the range they're
+# clamped to. These live as plain attributes on the shared `args` Namespace (the single source both
+# GestureDetector and Session already read every packet/touch), so writing one here takes effect
+# immediately with no restart -- see Config.apply().
+THRESHOLD_FIELDS = {
+    "flick_dps": (50.0, 600.0, float),
+    "thrust_g": (0.15, 2.0, float),
+    "twist_deg": (10.0, 120.0, float),
+    "twist_min_dps": (20.0, 300.0, float),
+    "gesture_gap": (0.1, 2.0, float),
+    "gesture_confirm": (0.05, 1.0, float),
+    "twist_sign": (None, None, lambda v: 1 if float(v) >= 0 else -1),
+    "flip_ud": (None, None, bool),
+    "flip_lr": (None, None, bool),
+}
+
+
+class Config:
+    """The live, remappable part of the setup: thresholds (on the shared `args` Namespace) and the
+    gesture->action mapping (its own dict, since `args` only ever held scalars). One instance per
+    `live()` run, shared between the Session (reads, on the main thread) and the websocket handler
+    (writes, on the broadcaster's background thread) -- `lock` only needs to guard `mapping` (a dict
+    swap isn't atomic the way a single attribute set is under the GIL); the threshold attributes on
+    `args` are written one at a time with plain `setattr`, each of which is itself atomic enough that
+    a reader never sees a half-written value, so no lock is needed there.
+    """
+
+    def __init__(self, args):
+        self.args = args
+        self.mapping = dict(DEFAULT_MAPPING)
+        self.lock = threading.Lock()
+
+    def action_for(self, gesture_name):
+        with self.lock:
+            return self.mapping.get(gesture_name, "none")
+
+    def apply(self, msg):
+        """Apply a `config_set` message's `thresholds` / `mapping` (both optional). Unknown keys,
+        unknown gesture/action ids, and values that don't cast are silently skipped rather than
+        raising -- a malformed message from a client should never be able to crash the server."""
+        for k, v in (msg.get("thresholds") or {}).items():
+            spec = THRESHOLD_FIELDS.get(k)
+            if spec is None:
+                continue
+            lo, hi, cast = spec
+            try:
+                v = cast(v)
+            except (TypeError, ValueError):
+                continue
+            if lo is not None:
+                v = min(max(v, lo), hi)
+            setattr(self.args, k, v)
+        mp = msg.get("mapping")
+        if isinstance(mp, dict):
+            with self.lock:
+                for g, a in mp.items():
+                    if g in GESTURE_META and a in ACTION_META:
+                        self.mapping[g] = a
+
+    def snapshot(self):
+        with self.lock:
+            mapping = dict(self.mapping)
+        return {
+            "type": "config",
+            "thresholds": {k: getattr(self.args, k) for k in THRESHOLD_FIELDS},
+            "mapping": mapping,
+            "gestures": GESTURE_META,
+            "actions": ACTION_META,
+        }
 
 
 class GestureDetector:
@@ -256,13 +390,12 @@ class GestureDetector:
     ARM_LOCK_S = 0.10
 
     def __init__(self, meta, args):
-        self.cfg = args
+        self.cfg = args  # read live every packet, including by this field's own name: a `config_set`
+        # (--flip-ud/--flip-lr included) takes effect on the very next packet, no restart needed.
         self.axis = np.asarray(meta["pen_axis"], float)
         self.axis = self.axis / np.linalg.norm(self.axis)
         self.bias = np.asarray(meta["gyro_bias_dps"], float)
         self.acc_scale = float(meta["acc_scale"])
-        self.ud = -1.0 if args.flip_ud else 1.0
-        self.lr = -1.0 if args.flip_lr else 1.0
         self.reset([])
 
     # -- lifecycle ----------------------------------------------------------------------------
@@ -340,8 +473,8 @@ class GestureDetector:
         d /= max(float(np.linalg.norm(d)), 1e-6)
         thrust = float(lin @ d)
 
-        up_rate = -pitch * self.ud  # + = up
-        right_rate = -yaw * self.lr  # + = right
+        up_rate = -pitch * (-1.0 if cfg.flip_ud else 1.0)  # + = up
+        right_rate = -yaw * (-1.0 if cfg.flip_lr else 1.0)  # + = right
         tw_rate = roll * cfg.twist_sign  # + = clockwise
         T, Tt = cfg.flick_dps, cfg.thrust_g
         sc = {
@@ -349,7 +482,8 @@ class GestureDetector:
             "flick_down": max(0.0, -up_rate) / T,
             "flick_left": max(0.0, -right_rate) / T,
             "flick_right": max(0.0, right_rate) / T,
-            "thrust": max(0.0, thrust) / Tt,
+            "thrust_fwd": max(0.0, thrust) / Tt,
+            "thrust_back": max(0.0, -thrust) / Tt,
         }
 
         events = []
@@ -450,9 +584,9 @@ def _num(v):
 
 
 class Session:
-    def __init__(self, bc, meta, stream, typist, det, args, trace_scale=1.0):
+    def __init__(self, bc, meta, stream, typist, det, args, config, trace_scale=1.0):
         self.bc, self.meta, self.stream, self.typist = bc, meta, stream, typist
-        self.det, self.args, self.scale = det, args, trace_scale
+        self.det, self.args, self.config, self.scale = det, args, config, trace_scale
         self.active = False
         self.begin(None)
 
@@ -529,8 +663,8 @@ class Session:
                 self.det.arm(p[0])
                 self.bc.send({"type": "mode", "mode": "gesture"})
                 print(
-                    "  [GESTURE MODE on]  flick up/down = case, left = backspace, right = space, "
-                    "thrust = enter, twist = cursor. Release to go back to writing."
+                    "  [GESTURE MODE on]  (see the settings panel for the current mapping). "
+                    "Release to go back to writing."
                 )
             if self.active:
                 self.bc.send(dbg)
@@ -556,40 +690,58 @@ class Session:
 
     # -- gesture actions ----------------------------------------------------------------------
     def handle(self, name, score):
+        """`name` is the raw motion the detector saw (e.g. "flick_up"); it's resolved through the
+        CURRENT live mapping (config.action_for) to decide what actually happens -- this is the one
+        place remapping takes effect. If a motion is unmapped ("none"), it's still reported to the
+        frontend (for the settings panel / gauges) but does nothing to the text."""
         t, bc = self.typist, self.bc
-        label = GESTURE_LABELS[name]
+        action = self.config.action_for(name)
         note = ""
-        if name == "flick_up":
+        if action == "uppercase":
             t.caps = True
             bc.send({"type": "caps", "on": True})
-        elif name == "flick_down":
+        elif action == "lowercase":
             t.caps = False
             bc.send({"type": "caps", "on": False})
-        elif name == "flick_left":
+        elif action == "caps_toggle":
+            t.caps = not t.caps
+            bc.send({"type": "caps", "on": t.caps})
+        elif action == "backspace":
             note = "" if t.backspace() else "  (nothing to delete)"
             bc.send(t.snapshot())
-        elif name == "flick_right":
+        elif action == "space":
             t.put(" ")
             bc.send(t.snapshot())
-        elif name == "thrust":
+        elif action == "enter":
             t.put("\n")
             bc.send(t.snapshot())
-        elif name == "twist_ccw":
+        elif action == "cursor_back":
             note = "" if t.move(-1) else "  (at start)"
             bc.send(t.snapshot())
-        elif name == "twist_cw":
+        elif action == "cursor_fwd":
             note = "" if t.move(1) else "  (at end)"
             bc.send(t.snapshot())
+        # action == "none": nothing to do to the text.
+        gesture_label, action_label = GESTURE_META[name], ACTION_META[action]
         bc.send(
-            {"type": "gesture", "name": name, "label": label, "score": round(score, 2)}
+            {
+                "type": "gesture",
+                "name": name,
+                "action": action,
+                "gesture_label": gesture_label,
+                "action_label": action_label,
+                "score": round(score, 2),
+            }
         )
         extra = (
             f"   [caps: {'ON ' if t.caps else 'off'}]"
-            if name in ("flick_up", "flick_down")
+            if action in ("uppercase", "lowercase", "caps_toggle")
             else ""
         )
-        print(f"  [gesture] {label:<10} (x{score:.1f}){note}{extra}")
-        if name not in ("flick_up", "flick_down"):
+        print(
+            f"  [gesture] {gesture_label} -> {action_label}  (x{score:.1f}){note}{extra}"
+        )
+        if action not in ("uppercase", "lowercase", "caps_toggle", "none"):
             print(t.show())
 
 
@@ -641,9 +793,22 @@ def live(args):
         )
 
     typist = Typist()
+    config = Config(
+        args
+    )  # starting thresholds come from the CLI flags below; remappable live.
     det = GestureDetector(meta, args)
-    sess = Session(broadcaster, meta, stream, typist, det, args)
+    sess = Session(broadcaster, meta, stream, typist, det, args, config)
+
+    def on_ws_message(msg):
+        if msg.get("type") == "config_set":
+            config.apply(msg)
+            broadcaster.send(
+                config.snapshot()
+            )  # echo the resulting config to every client
+
+    broadcaster.on_message = on_ws_message
     broadcaster.snapshot = lambda: [
+        config.snapshot(),
         {"type": "caps", "on": typist.caps},
         {"type": "mode", "mode": "gesture" if sess.active else "write"},
         typist.snapshot(),
@@ -659,6 +824,7 @@ def live(args):
     )
     print(f"  [caps: {'ON ' if typist.caps else 'off'}]")
     broadcaster.send({"type": "clear"})
+    broadcaster.send(config.snapshot())
     broadcaster.send({"type": "caps", "on": typist.caps})
     broadcaster.send({"type": "mode", "mode": "write"})
     broadcaster.send(typist.snapshot())
@@ -753,7 +919,12 @@ def main():
         help="skip the websocket server; behaves like plain dtw_eval.py --live",
     )
 
-    g = ap.add_argument_group("gesture mode (--live)")
+    g = ap.add_argument_group(
+        "gesture mode (--live)",
+        "Starting values only -- every one of these (plus the whole gesture->action mapping) can "
+        "also be changed live, per the running server, from the frontend's settings panel, with no "
+        "restart. These flags just set what a freshly started server begins with.",
+    )
     g.add_argument(
         "--no-gestures",
         dest="gestures",
@@ -782,7 +953,7 @@ def main():
         "--thrust-g",
         type=float,
         default=0.6,
-        help="forward acceleration that counts as a thrust (default 0.6 g)",
+        help="forward/backward acceleration that counts as a thrust (default 0.6 g)",
     )
     g.add_argument(
         "--twist-deg",
