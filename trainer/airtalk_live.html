@@ -1,610 +1,471 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AirTalk — Live</title>
+<title>AirTalk Live</title>
 <style>
-  :root{
-    --paper:#EDE6D3;
-    --paper-edge:#E2D9BF;
-    --rule:#C9BFA0;
-    --margin-rule:#B8664F;
-    --ink:#1F2E4A;
-    --ink-soft:#4A5C82;
-    --accent:#9C4A2E;
-    --well-bg:#12151C;
-    --well-bg2:#1B2030;
+  :root {
+    --bg: #0d1117; --card: #161b22; --card2: #1d242d; --line: #2b3440;
+    --text: #e6edf3; --dim: #8b98a8;
+    --write: #4aa8ff; --gest: #ffb020; --ok: #3ddc84; --bad: #ff5d5d;
+    --accent: var(--write);
   }
-  *{box-sizing:border-box;}
-  html,body{height:100%;}
-  body{
-    margin:0;
-    background:#0E1015;
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    color:var(--ink);
-    display:flex;
-    flex-direction:column;
-    height:100vh;
-    overflow:hidden;
+  body.gesture { --accent: var(--gest); }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-
-  /* ---------- header ---------- */
-  header{
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
-    gap:16px;
-    padding:14px 22px;
-    background:#0E1015;
-    border-bottom:1px solid #22262f;
-    flex-wrap:wrap;
+  /* glowing frame while in gesture mode */
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 50;
+    box-shadow: inset 0 0 0 0 var(--gest); opacity: 0; transition: opacity .2s;
   }
-  .brand{
-    display:flex;
-    align-items:baseline;
-    gap:10px;
-  }
-  .brand .nib{
-    width:9px;height:9px;border-radius:2px 2px 2px 0;
-    background:var(--accent);
-    transform:rotate(45deg);
-    box-shadow:0 0 8px var(--accent);
-  }
-  .brand h1{
-    font-size:17px;
-    font-weight:600;
-    letter-spacing:0.2px;
-    color:#EDE6D3;
-    margin:0;
-  }
-  .brand span.sub{
-    font-size:12px;
-    color:#6b7280;
+  body.gesture::before { opacity: 1; animation: frame 1.4s ease-in-out infinite; }
+  @keyframes frame {
+    0%, 100% { box-shadow: inset 0 0 0 4px rgba(255,176,32,.55), inset 0 0 40px rgba(255,176,32,.12); }
+    50%      { box-shadow: inset 0 0 0 4px rgba(255,176,32,.95), inset 0 0 70px rgba(255,176,32,.28); }
   }
 
-  .controls{
-    display:flex;
-    align-items:center;
-    gap:10px;
-    flex-wrap:wrap;
+  header {
+    display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: center;
+    padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--card);
   }
-  .controls input[type=text]{
-    background:#171a21;
-    border:1px solid #2a2f3a;
-    color:#cfd3da;
-    font-size:12.5px;
-    padding:7px 10px;
-    border-radius:7px;
-    width:190px;
-    outline:none;
+  h1 { font-size: 17px; margin: 0; letter-spacing: .3px; }
+  h1 span { color: var(--accent); }
+  .grow { flex: 1; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px;
+    font-weight: 700; font-size: 13px; letter-spacing: .6px; border: 1px solid var(--line);
+    background: var(--card2); transition: background .15s, color .15s, border-color .15s, box-shadow .15s;
   }
-  .controls input[type=text]:focus{border-color:var(--accent);}
-  button{
-    font-family:inherit;
-    font-size:12.5px;
-    font-weight:600;
-    padding:7px 13px;
-    border-radius:7px;
-    border:1px solid #2a2f3a;
-    background:#171a21;
-    color:#cfd3da;
-    cursor:pointer;
-    transition:background .15s, border-color .15s, color .15s;
+  .pill .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); }
+  #modePill.write   { color: var(--write); border-color: rgba(74,168,255,.5); }
+  #modePill.write .dot   { background: var(--write); }
+  #modePill.gesture { color: #1a1200; background: var(--gest); border-color: var(--gest);
+                      box-shadow: 0 0 18px rgba(255,176,32,.55); animation: pulse 1s ease-in-out infinite; }
+  #modePill.gesture .dot { background: #1a1200; }
+  @keyframes pulse { 50% { box-shadow: 0 0 30px rgba(255,176,32,.9); } }
+  #capsPill.on { color: #04140a; background: var(--ok); border-color: var(--ok); }
+  .conn { display: flex; align-items: center; gap: 8px; }
+  .conn input {
+    width: 210px; background: var(--card2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 10px; font: inherit;
   }
-  button:hover{border-color:#3a4150;}
-  button.primary{
-    background:var(--accent);
-    border-color:var(--accent);
-    color:#fff;
+  button {
+    font: inherit; color: var(--text); background: var(--card2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 12px; cursor: pointer;
   }
-  button.primary:hover{background:#B05837;}
-  button:disabled{opacity:.4;cursor:default;}
+  button:hover { border-color: var(--accent); }
+  #connDot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); }
+  #connDot.ok { background: var(--ok); }
 
-  .status{
-    display:flex;align-items:center;gap:6px;
-    font-size:12px;color:#8a9099;
+  main {
+    display: grid; gap: 16px; padding: 16px 20px 28px;
+    grid-template-columns: minmax(0, 1.25fr) minmax(320px, 1fr);
   }
-  .dot{width:7px;height:7px;border-radius:50%;background:#4a5060;transition:background .2s, box-shadow .2s;}
-  .dot.live{background:#5FBF7A;box-shadow:0 0 6px #5FBF7A;}
-  .dot.err{background:#C0564A;box-shadow:0 0 6px #C0564A;}
-
-  .caps-light{
-    display:flex;align-items:center;gap:6px;
-    font-size:11px;font-weight:700;letter-spacing:0.5px;
-    color:#5a606c;
-    padding:5px 9px;
-    border:1px solid #2a2f3a;
-    border-radius:6px;
-    transition:color .2s, border-color .2s;
-  }
-  .caps-light .bulb{width:6px;height:6px;border-radius:50%;background:#333844;transition:background .2s, box-shadow .2s;}
-  .caps-light.on{color:#EDC26B;border-color:#5a4a2a;}
-  .caps-light.on .bulb{background:#EDC26B;box-shadow:0 0 6px #EDC26B;}
-
-  /* ---------- main layout ---------- */
-  main{
-    flex:1;
-    display:flex;
-    gap:0;
-    min-height:0;
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .col { display: grid; gap: 16px; align-content: start; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
+  .card h2 {
+    margin: 0 0 10px; font-size: 12px; font-weight: 700; color: var(--dim);
+    text-transform: uppercase; letter-spacing: 1.2px; display: flex; justify-content: space-between;
   }
 
-  /* ---------- paper ---------- */
-  .paper-wrap{
-    flex:1;
-    padding:36px 0 36px 0;
-    overflow-y:auto;
-    display:flex;
-    justify-content:center;
+  /* ---- text ---- */
+  #text {
+    min-height: 150px; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+    font: 30px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace; padding: 4px 2px;
   }
-  .paper{
-    position:relative;
-    width:min(760px, 88%);
-    min-height:100%;
-    background:var(--paper);
-    background-image:repeating-linear-gradient(
-      to bottom,
-      transparent 0,
-      transparent 43px,
-      var(--rule) 43px,
-      var(--rule) 44px
-    );
-    box-shadow:0 20px 60px rgba(0,0,0,.45);
-    border-radius:2px;
-    padding:52px 46px 52px 68px;
-    line-height:44px;
-    font-size:30px;
-    font-family:"Segoe Script","Bradley Hand","Apple Chancery",cursive;
-    color:var(--ink);
-    word-wrap:break-word;
+  #text .ph { color: var(--dim); font-size: 18px; }
+  .caret {
+    display: inline-block; width: 3px; height: 1.05em; margin: 0 -1px; vertical-align: text-bottom;
+    background: var(--accent); animation: blink 1s steps(2, start) infinite;
   }
-  .paper::before{
-    content:"";
-    position:absolute;
-    top:0;bottom:0;left:44px;
-    width:1px;
-    background:var(--margin-rule);
-    opacity:.55;
+  body.gesture .caret { width: 6px; background: var(--gest); box-shadow: 0 0 10px var(--gest); }
+  .caret.nudge { animation: none; box-shadow: 0 0 14px var(--accent); }
+  @keyframes blink { to { visibility: hidden; } }
+  .nl { color: var(--dim); font-size: .55em; vertical-align: middle; opacity: .8; }
+
+  /* ---- sketch ---- */
+  .sketchwrap { position: relative; transition: opacity .2s, filter .2s; }
+  body.gesture .sketchwrap { opacity: .25; filter: grayscale(1); }
+  #sketch { width: 100%; height: 260px; display: block; background: #0a0e13; border-radius: 12px; }
+  #big {
+    position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
+    font: 700 150px/1 ui-monospace, Menlo, Consolas, monospace; color: var(--write); opacity: 0;
   }
-  .placeholder{
-    color:#B7AD90;
-    font-size:20px;
-    font-family:-apple-system,sans-serif;
-    font-style:italic;
-  }
-  .char{
-    display:inline-block;
-    opacity:0;
-    transform:translateY(10px) scale(.4) rotate(var(--tilt,0deg));
-    animation:popIn .5s cubic-bezier(.2,1.4,.4,1) forwards;
-  }
-  .char.space{width:0.55em;}
-  @keyframes popIn{
-    0%{opacity:0; transform:translateY(10px) scale(.35) rotate(var(--tilt,0deg));}
-    60%{opacity:1; transform:translateY(-3px) scale(1.12) rotate(var(--tilt,0deg));}
-    100%{opacity:1; transform:translateY(0) scale(1) rotate(var(--tilt,0deg));}
+  #big.show { animation: bigchar .9s ease-out; }
+  @keyframes bigchar {
+    0% { opacity: .0; transform: scale(.7); } 15% { opacity: .85; transform: scale(1); }
+    100% { opacity: 0; transform: scale(1.15); }
   }
 
-  /* ---------- ink well / sensor panel ---------- */
-  .well-wrap{
-    width:230px;
-    flex-shrink:0;
-    padding:28px 20px;
-    display:flex;
-    flex-direction:column;
-    align-items:center;
-    gap:14px;
-    border-left:1px solid #1b1e26;
-    background:linear-gradient(180deg,#0E1015,#0B0D11);
+  /* ---- gesture HUD ---- */
+  #hud { transition: opacity .2s, border-color .2s, box-shadow .2s; opacity: .55; position: relative; }
+  body.gesture #hud { opacity: 1; border-color: var(--gest); box-shadow: 0 0 0 1px var(--gest), 0 0 30px rgba(255,176,32,.18); }
+  .hint { color: var(--dim); font-size: 13px; margin: -2px 0 12px; min-height: 1.4em; }
+  body.gesture .hint { color: var(--gest); font-weight: 600; }
+  .pad {
+    display: grid; gap: 8px; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(3, 84px);
+    grid-template-areas: ". up ." "left thrust right" ". down .";
+    max-width: 440px; margin: 0 auto;
   }
-  .well-label{
-    font-size:11px;
-    color:#6b7280;
-    letter-spacing:.3px;
+  .key {
+    position: relative; overflow: hidden; display: grid; place-items: center; text-align: center;
+    background: var(--card2); border: 1px solid var(--line); border-radius: 14px; isolation: isolate;
   }
-  .well{
-    position:relative;
-    width:168px;height:168px;
-    border-radius:50%;
-    background:radial-gradient(circle at 50% 45%, var(--well-bg2), var(--well-bg) 75%);
-    box-shadow:
-      inset 0 0 30px rgba(0,0,0,.6),
-      0 0 0 1px #23272f,
-      0 10px 30px rgba(0,0,0,.5);
-    overflow:hidden;
+  .key::before {   /* live level: fills with the gesture score; full = detection threshold */
+    content: ""; position: absolute; inset: 0; z-index: -1; background: var(--gest);
+    opacity: calc(var(--lvl, 0) * .6); transition: opacity .06s linear;
   }
-  .well canvas{
-    position:absolute;inset:0;
-    width:100%;height:100%;
+  .key b { display: block; font-size: 26px; line-height: 1; }
+  .key small { display: block; font-size: 10px; letter-spacing: .8px; color: var(--dim); margin-top: 4px; font-weight: 700; }
+  .key.fire { animation: fire .55s ease-out; }
+  @keyframes fire {
+    0% { background: var(--gest); transform: scale(1.08); box-shadow: 0 0 36px var(--gest); color: #1a1200; }
+    100% { transform: scale(1); }
   }
-  .well-state{
-    font-size:12px;
-    color:#7b8290;
-    min-height:16px;
-    transition:color .2s;
+  .key.fire small { color: inherit; }
+  .k-up { grid-area: up; } .k-down { grid-area: down; } .k-left { grid-area: left; }
+  .k-right { grid-area: right; } .k-thrust { grid-area: thrust; }
+
+  .twistrow { display: flex; align-items: center; justify-content: center; gap: 18px; margin-top: 14px; }
+  .twistrow .lbl { font-size: 12px; color: var(--dim); font-weight: 700; letter-spacing: .6px; text-align: center; width: 92px; }
+  .twistrow .lbl.fire { color: var(--gest); animation: lblfire .55s ease-out; }
+  @keyframes lblfire { 0% { transform: scale(1.3); } 100% { transform: scale(1); } }
+  #dial { width: 120px; height: 120px; }
+  #needle { transform-origin: 60px 60px; transition: transform .05s linear; }
+  #dialring { transition: stroke .1s; }
+  #dial.fireL #dialring { stroke: var(--gest); } #dial.fireR #dialring { stroke: var(--gest); }
+
+  #toast {
+    position: absolute; left: 50%; top: 46%; transform: translate(-50%, -50%) scale(.8);
+    padding: 12px 26px; border-radius: 14px; font-size: 30px; font-weight: 800; letter-spacing: 1px;
+    color: #1a1200; background: var(--gest); box-shadow: 0 0 50px rgba(255,176,32,.7);
+    opacity: 0; pointer-events: none; white-space: nowrap; z-index: 5;
   }
-  .well-state.writing{color:#E0975A;font-weight:600;}
+  #toast.show { animation: toast 1s ease-out; }
+  @keyframes toast {
+    0% { opacity: 0; transform: translate(-50%, -50%) scale(.7); }
+    12% { opacity: 1; transform: translate(-50%, -50%) scale(1.05); }
+    70% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    100% { opacity: 0; transform: translate(-50%, -62%) scale(1); }
+  }
+
+  .dbg { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px 14px; font: 12px ui-monospace, Menlo, Consolas, monospace; color: var(--dim); }
+  .dbg i { font-style: normal; color: var(--text); }
+  #state { padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); }
+  #state.armed { color: var(--ok); border-color: var(--ok); }
+  #state.window, #state.lockout { color: var(--gest); border-color: var(--gest); }
+
+  #log { list-style: none; margin: 10px 0 0; padding: 0; font-size: 13px; color: var(--dim); max-height: 118px; overflow: hidden; }
+  #log li { display: flex; justify-content: space-between; padding: 2px 0; border-top: 1px solid var(--line); }
+  #log li:first-child { color: var(--text); border-top: 0; }
+
+  .legend { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; color: var(--dim); }
+  .legend b { color: var(--text); }
+  details { margin-top: 12px; color: var(--dim); font-size: 13px; }
+  details summary { cursor: pointer; }
+  .demo { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    body.gesture::before, #modePill.gesture, .caret { animation: none !important; }
+  }
 </style>
 </head>
 <body>
-
 <header>
-  <div class="brand">
-    <div class="nib"></div>
-    <h1>AirTalk</h1>
-    <span class="sub">live air-writing demo</span>
-  </div>
-
-  <div class="controls">
-    <div class="caps-light" id="capsLight"><span class="bulb"></span>CAPS</div>
-    <div class="status"><span class="dot" id="statusDot"></span><span id="statusText">not connected</span></div>
-    <input type="text" id="wsUrl" value="ws://localhost:8765" spellcheck="false">
-    <button id="connectBtn">Connect</button>
-    <button id="simBtn">Simulate</button>
-    <button id="clearBtn">Clear</button>
+  <h1>Air<span>Talk</span> Live</h1>
+  <span class="pill write" id="modePill"><span class="dot"></span><span id="modeTxt">WRITE MODE</span></span>
+  <span class="pill" id="capsPill" title="Flick up = UPPERCASE, flick down = lowercase">abc</span>
+  <span class="grow"></span>
+  <div class="conn">
+    <span id="connDot"></span><span id="connTxt" style="color:var(--dim)">disconnected</span>
+    <input id="wsUrl" spellcheck="false" aria-label="WebSocket address">
+    <button id="connBtn">Connect</button>
   </div>
 </header>
 
 <main>
-  <div class="paper-wrap">
-    <div class="paper" id="paper">
-      <span class="placeholder" id="placeholder">waiting for the pen…</span>
-    </div>
+  <div class="col">
+    <section class="card">
+      <h2><span>Text</span><span id="cursorInfo"></span></h2>
+      <div id="text" aria-live="polite"></div>
+    </section>
+    <section class="card">
+      <h2><span>Air sketch</span><span>write a character, then release</span></h2>
+      <div class="sketchwrap">
+        <canvas id="sketch" width="900" height="520"></canvas>
+        <div id="big"></div>
+      </div>
+    </section>
   </div>
 
-  <div class="well-wrap">
-    <div class="well-label">live stroke</div>
-    <div class="well"><canvas id="wellCanvas"></canvas></div>
-    <div class="well-state" id="wellState">idle</div>
+  <div class="col">
+    <section class="card" id="hud">
+      <h2><span>Gesture mode</span><span id="gstate"></span></h2>
+      <div class="hint" id="hint">Tap, release, then touch again quickly and <b>hold</b> to enter gesture mode.</div>
+      <div class="pad">
+        <div class="key k-up" id="k-up"><div><b>&#8593;</b><small>UPPERCASE</small></div></div>
+        <div class="key k-left" id="k-left"><div><b>&#8592;</b><small>BACKSPACE</small></div></div>
+        <div class="key k-thrust" id="k-thrust"><div><b>&#9166;</b><small>ENTER &middot; THRUST</small></div></div>
+        <div class="key k-right" id="k-right"><div><b>&#8594;</b><small>SPACE</small></div></div>
+        <div class="key k-down" id="k-down"><div><b>&#8595;</b><small>lowercase</small></div></div>
+      </div>
+      <div class="twistrow">
+        <div class="lbl" id="lbl-ccw">&#8634; TWIST LEFT<br>cursor back</div>
+        <svg id="dial" viewBox="0 0 120 120" aria-hidden="true">
+          <circle id="dialring" cx="60" cy="60" r="50" fill="none" stroke="#2b3440" stroke-width="6"/>
+          <path d="M60 10 A50 50 0 0 1 100 30" fill="none" stroke="#3a4656" stroke-width="3" stroke-linecap="round" opacity=".7"/>
+          <path d="M60 10 A50 50 0 0 0 20 30" fill="none" stroke="#3a4656" stroke-width="3" stroke-linecap="round" opacity=".7"/>
+          <g id="needle"><line x1="60" y1="60" x2="60" y2="18" stroke="var(--gest)" stroke-width="5" stroke-linecap="round"/>
+            <circle cx="60" cy="60" r="6" fill="var(--gest)"/></g>
+        </svg>
+        <div class="lbl" id="lbl-cw">TWIST RIGHT &#8635;<br>cursor forward</div>
+      </div>
+      <div class="dbg">
+        <span id="state">idle</span>
+        <span>up/down <i id="d-ud">0.00</i></span>
+        <span>left/right <i id="d-lr">0.00</i></span>
+        <span>thrust <i id="d-fw">0.00</i></span>
+        <span>twist <i id="d-tw">0.0&deg;</i></span>
+      </div>
+      <ul id="log"></ul>
+      <div id="toast"></div>
+    </section>
+
+    <section class="card">
+      <h2><span>How it works</span></h2>
+      <div class="legend">
+        <b>Write</b><span>touch, draw a character, release</span>
+        <b>Gesture mode</b><span>tap, release, touch again quickly and hold; release to leave</span>
+        <b>Flick &#8593; / &#8595;</b><span>uppercase / lowercase (sets, doesn't toggle)</span>
+        <b>Flick &#8592; / &#8594;</b><span>backspace / space</span>
+        <b>Thrust forward</b><span>Enter</span>
+        <b>Twist</b><span>anticlockwise = cursor back, clockwise = cursor forward</span>
+      </div>
+      <details>
+        <summary>Demo without the pen</summary>
+        <div class="demo" id="demo"></div>
+      </details>
+    </section>
   </div>
 </main>
 
 <script>
-(function(){
-  "use strict";
+"use strict";
+const $ = (id) => document.getElementById(id);
 
-  // ================= state =================
-  const state = {
-    ws:null,
-    connected:false,
-    capsOn:false,
-    touched:false,
-    magnitude:0,       // smoothed ambient motion energy, 0..1-ish (drives the background glow)
-    targetMagnitude:0,
-    simTimer:null,
-    // live stroke trace: the real (or simulated) points streamed in during the current touch
-    trace:[],          // [{x,y}, ...] in raw/arbitrary units -- auto-fit to the panel each frame
-    traceAlpha:0,       // 1 while writing/fresh, eases to 0 after release
+// ------------------------------------------------------------------ state
+const S = { text: "", cursor: 0, caps: false, mode: "write", ws: null, wantConn: false, retry: null };
+const GEST = {
+  flick_up:    { key: "k-up",     label: "\u2191 UPPERCASE" },
+  flick_down:  { key: "k-down",   label: "\u2193 lowercase" },
+  flick_left:  { key: "k-left",   label: "\u2190 BACKSPACE" },
+  flick_right: { key: "k-right",  label: "\u2192 SPACE" },
+  thrust:      { key: "k-thrust", label: "\u23ce ENTER" },
+  twist_ccw:   { key: null, lbl: "lbl-ccw", dial: "fireL", label: "\u21ba CURSOR BACK" },
+  twist_cw:    { key: null, lbl: "lbl-cw",  dial: "fireR", label: "\u21bb CURSOR FORWARD" },
+};
+
+// ------------------------------------------------------------------ text view
+function renderText() {
+  const el = $("text");
+  el.textContent = "";
+  const c = Math.min(Math.max(S.cursor, 0), S.text.length);
+  const addText = (s) => {
+    const parts = s.split("\n");
+    parts.forEach((p, i) => {
+      el.appendChild(document.createTextNode(p));
+      if (i < parts.length - 1) {
+        const nl = document.createElement("span");
+        nl.className = "nl"; nl.textContent = "\u23ce";
+        el.appendChild(nl); el.appendChild(document.createTextNode("\n"));
+      }
+    });
   };
-
-  const paper = document.getElementById('paper');
-  const placeholder = document.getElementById('placeholder');
-  const statusDot = document.getElementById('statusDot');
-  const statusText = document.getElementById('statusText');
-  const capsLight = document.getElementById('capsLight');
-  const wellState = document.getElementById('wellState');
-  const wsUrlInput = document.getElementById('wsUrl');
-  const connectBtn = document.getElementById('connectBtn');
-  const simBtn = document.getElementById('simBtn');
-  const clearBtn = document.getElementById('clearBtn');
-
-  // ================= paper / characters =================
-  function addChar(ch){
-    if (placeholder && placeholder.parentNode) placeholder.remove();
-    const span = document.createElement('span');
-    if (ch === ' '){
-      span.className = 'char space';
-      span.textContent = '\u00A0';
-    } else {
-      span.className = 'char';
-      span.textContent = ch;
-      const tilt = (Math.random()*10 - 5).toFixed(1);
-      span.style.setProperty('--tilt', tilt + 'deg');
-    }
-    paper.appendChild(span);
-    paper.parentNode.scrollTop = paper.parentNode.scrollHeight;
+  addText(S.text.slice(0, c));
+  const caret = document.createElement("span");
+  caret.className = "caret"; caret.id = "caret";
+  el.appendChild(caret);
+  addText(S.text.slice(c));
+  if (!S.text) {
+    const ph = document.createElement("span");
+    ph.className = "ph"; ph.textContent = " write something in the air\u2026";
+    el.appendChild(ph);
   }
+  $("cursorInfo").textContent = S.text ? `cursor ${c}/${S.text.length}` : "";
+  caret.scrollIntoView && caret.scrollIntoView({ block: "nearest" });
+}
+function nudgeCaret() {
+  const c = $("caret"); if (!c) return;
+  c.classList.add("nudge"); setTimeout(() => c.classList.remove("nudge"), 260);
+}
 
-  function clearPaper(){
-    paper.innerHTML = '';
-    paper.appendChild(placeholder);
+// ------------------------------------------------------------------ mode / caps
+function setMode(m) {
+  S.mode = m === "gesture" ? "gesture" : "write";
+  const g = S.mode === "gesture";
+  document.body.classList.toggle("gesture", g);
+  $("modePill").className = "pill " + S.mode;
+  $("modeTxt").textContent = g ? "GESTURE MODE" : "WRITE MODE";
+  $("hint").innerHTML = g
+    ? "Gestures active &mdash; flick, thrust or twist. <b>Release to go back to writing.</b>"
+    : "Tap, release, then touch again quickly and <b>hold</b> to enter gesture mode.";
+  $("gstate").textContent = g ? "ACTIVE" : "";
+  if (!g) resetGauges();
+}
+function setCaps(on) {
+  S.caps = !!on;
+  $("capsPill").className = "pill" + (S.caps ? " on" : "");
+  $("capsPill").textContent = S.caps ? "ABC" : "abc";
+}
+
+// ------------------------------------------------------------------ gesture visuals
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+function setLvl(id, v) { $(id).style.setProperty("--lvl", clamp(v / 1.2, 0, 1).toFixed(3)); }
+function resetGauges() {
+  ["k-up", "k-down", "k-left", "k-right", "k-thrust"].forEach((k) => setLvl(k, 0));
+  $("needle").style.transform = "rotate(0deg)";
+  $("state").textContent = "idle"; $("state").className = "";
+  ["d-ud", "d-lr", "d-fw"].forEach((i) => ($(i).textContent = "0.00"));
+  $("d-tw").textContent = "0.0\u00b0";
+}
+function updateGauges(m) {
+  setLvl("k-up", m.ud); setLvl("k-down", -m.ud);
+  setLvl("k-right", m.lr); setLvl("k-left", -m.lr);
+  setLvl("k-thrust", m.fw);
+  const frac = clamp(m.tw_deg / (m.tw_step || 40), -1, 1);
+  $("needle").style.transform = `rotate(${(frac * 60).toFixed(1)}deg)`;
+  $("d-ud").textContent = m.ud.toFixed(2);
+  $("d-lr").textContent = m.lr.toFixed(2);
+  $("d-fw").textContent = m.fw.toFixed(2);
+  $("d-tw").textContent = m.tw_deg.toFixed(1) + "\u00b0";
+  const st = $("state");
+  st.textContent = m.state === "warmup" ? "starting\u2026" : m.state === "armed" ? "ready" : m.state;
+  st.className = m.state;
+}
+function retrigger(el, cls) { el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); }
+function fire(name, label) {
+  const g = GEST[name]; if (!g) return;
+  if (g.key) retrigger($(g.key), "fire");
+  if (g.lbl) {
+    retrigger($(g.lbl), "fire");
+    const d = $("dial"); d.classList.add(g.dial); setTimeout(() => d.classList.remove(g.dial), 350);
   }
+  const t = $("toast"); t.textContent = label || g.label; retrigger(t, "show");
+  const li = document.createElement("li");
+  const when = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  li.innerHTML = `<span></span><span>${when}</span>`; li.firstChild.textContent = label || g.label;
+  const log = $("log"); log.insertBefore(li, log.firstChild);
+  while (log.children.length > 5) log.removeChild(log.lastChild);
+  if (name === "twist_ccw" || name === "twist_cw") nudgeCaret();
+}
 
-  function setCaps(on){
-    state.capsOn = on;
-    capsLight.classList.toggle('on', !!on);
+// ------------------------------------------------------------------ air sketch
+const cv = $("sketch"), cx = cv.getContext("2d");
+let pts = [];
+function drawSketch() {
+  cx.clearRect(0, 0, cv.width, cv.height);
+  cx.fillStyle = "#0a0e13"; cx.fillRect(0, 0, cv.width, cv.height);
+  if (pts.length < 2) return;
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const [x, y] of pts) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  const pad = 50, w = Math.max(x1 - x0, 20), h = Math.max(y1 - y0, 20);
+  const k = Math.min((cv.width - 2 * pad) / w, (cv.height - 2 * pad) / h);
+  const ox = (cv.width - w * k) / 2 - x0 * k, oy = (cv.height - h * k) / 2 - y0 * k;
+  cx.lineWidth = 7; cx.lineCap = "round"; cx.lineJoin = "round"; cx.strokeStyle = "#4aa8ff";
+  cx.shadowColor = "rgba(74,168,255,.6)"; cx.shadowBlur = 14;
+  cx.beginPath();
+  pts.forEach(([x, y], i) => (i ? cx.lineTo(x * k + ox, y * k + oy) : cx.moveTo(x * k + ox, y * k + oy)));
+  cx.stroke(); cx.shadowBlur = 0;
+}
+function flashChar(ch) {
+  const b = $("big"); b.textContent = ch; retrigger(b, "show");
+}
+
+// ------------------------------------------------------------------ message handling
+function handle(m) {
+  switch (m.type) {
+    case "text": S.text = m.text; S.cursor = m.cursor; renderText(); break;
+    case "caps": setCaps(m.on); break;
+    case "mode": setMode(m.mode); break;
+    case "gest": if (S.mode === "gesture") updateGauges(m); break;
+    case "gesture": fire(m.name, m.label); break;
+    case "char": flashChar(m.char); break;
+    case "touch_start": pts = []; drawSketch(); break;
+    case "imu": if (m.touched) { pts.push([m.x, m.y]); drawSketch(); } break;
+    case "touch_end": break;
+    case "clear": pts = []; drawSketch(); break;
   }
+}
 
-  function setWriting(on){
-    state.touched = on;
-    state.targetMagnitude = on ? 0.45 : 0.06;
-    wellState.textContent = on ? 'writing…' : 'idle';
-    wellState.classList.toggle('writing', on);
-    if (on) state.traceAlpha = 1;
-  }
+// ------------------------------------------------------------------ websocket
+function setConn(ok, txt) {
+  $("connDot").className = ok ? "ok" : "";
+  $("connTxt").textContent = txt;
+  $("connBtn").textContent = S.wantConn ? "Disconnect" : "Connect";
+}
+function connect() {
+  if (S.ws) { try { S.ws.close(); } catch (e) {} }
+  const url = $("wsUrl").value.trim();
+  try { localStorage.setItem("airtalk_ws", url); } catch (e) {}
+  let ws;
+  try { ws = new WebSocket(url); } catch (e) { setConn(false, "bad address"); return; }
+  S.ws = ws; setConn(false, "connecting\u2026");
+  ws.onopen = () => setConn(true, "connected");
+  ws.onmessage = (ev) => { try { handle(JSON.parse(ev.data)); } catch (e) { console.error(e); } };
+  ws.onclose = () => {
+    if (S.ws !== ws) return;
+    setConn(false, S.wantConn ? "reconnecting\u2026" : "disconnected");
+    setMode("write");
+    if (S.wantConn) { clearTimeout(S.retry); S.retry = setTimeout(connect, 1500); }
+  };
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+}
+$("connBtn").onclick = () => {
+  S.wantConn = !S.wantConn;
+  if (S.wantConn) connect();
+  else { clearTimeout(S.retry); if (S.ws) S.ws.close(); setConn(false, "disconnected"); }
+};
 
-  function startTrace(){
-    state.trace = [];
-    state.traceAlpha = 1;
-  }
+// ------------------------------------------------------------------ demo (no pen needed)
+// Mirrors what the server does, so the visuals can be tried offline.
+function demoApply(name) {
+  const ins = (s) => { S.text = S.text.slice(0, S.cursor) + s + S.text.slice(S.cursor); S.cursor += s.length; };
+  if (name === "flick_up") setCaps(true);
+  else if (name === "flick_down") setCaps(false);
+  else if (name === "flick_left") { if (S.cursor > 0) { S.text = S.text.slice(0, S.cursor - 1) + S.text.slice(S.cursor); S.cursor--; } }
+  else if (name === "flick_right") ins(" ");
+  else if (name === "thrust") ins("\n");
+  else if (name === "twist_ccw") S.cursor = Math.max(0, S.cursor - 1);
+  else if (name === "twist_cw") S.cursor = Math.min(S.text.length, S.cursor + 1);
+  renderText();
+}
+function buildDemo() {
+  const d = $("demo");
+  const add = (txt, fn) => { const b = document.createElement("button"); b.textContent = txt; b.onclick = fn; d.appendChild(b); };
+  add("enter/leave gesture mode", () => setMode(S.mode === "gesture" ? "write" : "gesture"));
+  add("type a", () => { if (!(S.ws && S.ws.readyState === 1)) { const ch = S.caps ? "A" : "a"; S.text = S.text.slice(0, S.cursor) + ch + S.text.slice(S.cursor); S.cursor++; renderText(); flashChar(ch); } });
+  Object.keys(GEST).forEach((n) => add(GEST[n].label, () => {
+    if (S.ws && S.ws.readyState === 1) return;   // don't fight a live server
+    if (S.mode !== "gesture") setMode("gesture");
+    fire(n); demoApply(n);
+    handle({ type: "gest", ud: n === "flick_up" ? 1.4 : n === "flick_down" ? -1.4 : 0, lr: n === "flick_right" ? 1.4 : n === "flick_left" ? -1.4 : 0,
+             fw: n === "thrust" ? 1.3 : 0, tw: 0, tw_deg: n === "twist_cw" ? 30 : n === "twist_ccw" ? -30 : 0, tw_step: 40, state: "lockout" });
+  }));
+}
 
-  function pushTracePoint(x, y){
-    state.trace.push({x, y});
-    // keep it bounded so a very long or stuck touch doesn't grow forever
-    if (state.trace.length > 600) state.trace.shift();
-  }
-
-  // ================= ink well visualization =================
-  const canvas = document.getElementById('wellCanvas');
-  const ctx = canvas.getContext('2d');
-  let dpr = Math.max(1, window.devicePixelRatio || 1);
-
-  function resizeCanvas(){
-    const r = canvas.parentElement.getBoundingClientRect();
-    canvas.width = r.width * dpr;
-    canvas.height = r.height * dpr;
-    ctx.setTransform(dpr,0,0,dpr,0,0);
-  }
-  resizeCanvas();
-  window.addEventListener('resize', resizeCanvas);
-
-  const idleColor = [94, 122, 176];   // calm blue-grey
-  const activeColor = [224, 151, 90]; // warm gold-orange
-  function lerp(a,b,t){return a+(b-a)*t;}
-
-  let t0 = performance.now();
-  function drawWell(now){
-    const dt = (now - t0)/1000;
-    t0 = now;
-
-    state.magnitude = lerp(state.magnitude, state.targetMagnitude, Math.min(1, dt*3));
-    if (!state.touched) state.traceAlpha = Math.max(0, state.traceAlpha - dt*0.6);
-
-    const w = canvas.width/dpr, h = canvas.height/dpr;
-    ctx.clearRect(0,0,w,h);
-
-    const cx = w/2, cy = h/2;
-    const baseR = Math.min(w,h)*0.30;
-    const energy = state.magnitude;
-    const mixT = Math.min(1, energy*1.8);
-    const col = [
-      Math.round(lerp(idleColor[0], activeColor[0], mixT)),
-      Math.round(lerp(idleColor[1], activeColor[1], mixT)),
-      Math.round(lerp(idleColor[2], activeColor[2], mixT)),
-    ];
-
-    // ---- ambient glow: a quiet, breathing backdrop that tracks overall motion energy ----
-    const layers = 2;
-    for (let L=layers; L>=1; L--){
-      const layerT = now/1000;
-      const wobble = 4 + energy*16;
-      const speed = 0.5 + L*0.3 + energy*0.8;
-      const points = 56;
-      ctx.beginPath();
-      for (let i=0;i<=points;i++){
-        const a = (i/points)*Math.PI*2;
-        const n = Math.sin(a*3 + layerT*speed + L) * 0.5
-                + Math.sin(a*5 - layerT*speed*0.7 + L*2) * 0.5;
-        const r = baseR - (L-1)*10 + n*wobble;
-        const x = cx + Math.cos(a)*r;
-        const y = cy + Math.sin(a)*r*0.94;
-        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-      }
-      ctx.closePath();
-      ctx.fillStyle = `rgba(${col[0]},${col[1]},${col[2]},${0.08 + (layers-L)*0.05 + energy*0.05})`;
-      ctx.fill();
-    }
-    const grad = ctx.createRadialGradient(cx,cy,0,cx,cy,baseR*0.85);
-    grad.addColorStop(0, `rgba(${col[0]},${col[1]},${col[2]},${0.22+energy*0.18})`);
-    grad.addColorStop(1, `rgba(${col[0]},${col[1]},${col[2]},0)`);
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(cx,cy, baseR*0.85, 0, Math.PI*2);
-    ctx.fill();
-
-    // ---- the real stroke: auto-fit the incoming (x,y) trace to the panel and ink it in ----
-    const pts = state.trace;
-    if (pts.length > 1 && state.traceAlpha > 0.01){
-      let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
-      for (const p of pts){
-        if (p.x<minX) minX=p.x; if (p.x>maxX) maxX=p.x;
-        if (p.y<minY) minY=p.y; if (p.y>maxY) maxY=p.y;
-      }
-      const spanX = Math.max(maxX-minX, 0.6);
-      const spanY = Math.max(maxY-minY, 0.6);
-      const span = Math.max(spanX, spanY);
-      const midX = (minX+maxX)/2, midY = (minY+maxY)/2;
-      const pad = 0.78; // fraction of well radius the stroke is allowed to fill
-      const scale = (baseR*pad) / (span/2);
-
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      ctx.strokeStyle = `rgba(${activeColor[0]},${activeColor[1]},${activeColor[2]},${0.85*state.traceAlpha})`;
-      ctx.shadowColor = `rgba(${activeColor[0]},${activeColor[1]},${activeColor[2]},0.9)`;
-      ctx.shadowBlur = 10;
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      for (let i=0;i<pts.length;i++){
-        const x = cx + (pts[i].x - midX)*scale;
-        const y = cy + (pts[i].y - midY)*scale;
-        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-      }
-      ctx.stroke();
-      ctx.shadowBlur = 0;
-
-      // a small bright nib at the leading (most recent) point while actively writing
-      if (state.touched){
-        const last = pts[pts.length-1];
-        const x = cx + (last.x - midX)*scale;
-        const y = cy + (last.y - midY)*scale;
-        ctx.beginPath();
-        ctx.arc(x,y,3.5,0,Math.PI*2);
-        ctx.fillStyle = '#FFE8C8';
-        ctx.fill();
-      }
-    }
-
-    requestAnimationFrame(drawWell);
-  }
-  requestAnimationFrame(drawWell);
-
-  // ================= websocket =================
-  function setStatus(mode, text){
-    statusDot.className = 'dot' + (mode ? ' '+mode : '');
-    statusText.textContent = text;
-  }
-
-  function connect(){
-    const url = wsUrlInput.value.trim();
-    if (!url) return;
-    try { state.ws = new WebSocket(url); }
-    catch(e){ setStatus('err','invalid url'); return; }
-
-    setStatus('', 'connecting…');
-    connectBtn.disabled = true;
-
-    state.ws.onopen = () => {
-      state.connected = true;
-      setStatus('live', 'connected');
-      connectBtn.textContent = 'Disconnect';
-      connectBtn.disabled = false;
-    };
-    state.ws.onclose = () => {
-      state.connected = false;
-      setStatus('err', 'disconnected');
-      connectBtn.textContent = 'Connect';
-      connectBtn.disabled = false;
-    };
-    state.ws.onerror = () => {
-      setStatus('err', 'connection error');
-    };
-    state.ws.onmessage = (ev) => {
-      let msg;
-      try { msg = JSON.parse(ev.data); } catch(e){ return; }
-      handleMessage(msg);
-    };
-  }
-
-  function disconnect(){
-    if (state.ws) state.ws.close();
-    state.ws = null;
-  }
-
-  connectBtn.addEventListener('click', () => {
-    if (state.connected) disconnect(); else connect();
-  });
-
-  function handleMessage(msg){
-    switch(msg.type){
-      case 'imu': {
-        const gx = msg.gx||0, gy = msg.gy||0, gz = msg.gz||0;
-        const gmag = Math.sqrt(gx*gx+gy*gy+gz*gz) / 1000; // rough normalize, dps -> ~0-1
-        setWriting(!!msg.touched);
-        state.targetMagnitude = Math.max(state.targetMagnitude, Math.min(1, gmag));
-        if (msg.touched && typeof msg.x === 'number' && typeof msg.y === 'number'){
-          pushTracePoint(msg.x, msg.y);
-        }
-        break;
-      }
-      case 'touch_start':
-        setWriting(true);
-        startTrace();
-        break;
-      case 'touch_end':
-        setWriting(false);
-        break;
-      case 'char':
-        if (typeof msg.char === 'string' && msg.char.length) addChar(msg.char);
-        break;
-      case 'caps':
-        setCaps(!!msg.on);
-        break;
-      case 'clear':
-        clearPaper();
-        break;
-      default:
-        break;
-    }
-  }
-
-  // ================= simulate mode (offline rehearsal) =================
-  const DEMO_SENTENCE = "Hello World";
-
-  // Draws a small random lissajous-style doodle to stand in for a real stroke trace when
-  // there's no hardware connected -- same trace pipeline a live packet feed would drive.
-  function simulateStroke(durationMs, onDone){
-    startTrace();
-    const a = 1 + Math.random()*2, b = 1 + Math.random()*2;
-    const phase = Math.random()*Math.PI*2;
-    const steps = Math.max(10, Math.round(durationMs/22));
-    let i = 0;
-    function tick(){
-      if (i > steps){ onDone(); return; }
-      const u = i/steps;
-      const x = Math.sin(u*Math.PI*2*a + phase) * (0.6 + 0.4*Math.sin(u*Math.PI));
-      const y = Math.sin(u*Math.PI*2*b) * (0.6 + 0.4*Math.sin(u*Math.PI));
-      pushTracePoint(x, y);
-      state.targetMagnitude = 0.25 + Math.random()*0.35;
-      i++;
-      state.simTimer = setTimeout(tick, 22);
-    }
-    tick();
-  }
-
-  function simulateSentence(sentence){
-    if (state.simTimer) return; // already running
-    clearPaper();
-    setCaps(false);
-    let i = 0;
-
-    function step(){
-      if (i >= sentence.length){
-        state.simTimer = null;
-        setWriting(false);
-        simBtn.disabled = false;
-        return;
-      }
-      const ch = sentence[i];
-      i++;
-
-      if (ch === ' '){
-        addChar(' ');
-        state.simTimer = setTimeout(step, 180);
-        return;
-      }
-
-      const isUpper = ch === ch.toUpperCase() && ch.toLowerCase() !== ch.toUpperCase();
-      if (isUpper !== state.capsOn) setCaps(isUpper);
-
-      setWriting(true);
-      const writeMs = 380 + Math.random()*380;
-
-      simulateStroke(writeMs, () => {
-        // touch-release: character resolved, pop it onto the page
-        setWriting(false);
-        addChar(ch);
-        const pauseMs = 150 + Math.random()*220;
-        state.simTimer = setTimeout(step, pauseMs);
-      });
-    }
-    step();
-  }
-
-  simBtn.addEventListener('click', () => {
-    simBtn.disabled = true;
-    simulateSentence(DEMO_SENTENCE);
-  });
-
-  clearBtn.addEventListener('click', () => {
-    if (state.simTimer){ clearTimeout(state.simTimer); state.simTimer = null; simBtn.disabled = false; }
-    clearPaper();
-    setWriting(false);
-    setCaps(false);
-    state.trace = [];
-    state.traceAlpha = 0;
-  });
-
+// ------------------------------------------------------------------ init
+(function init() {
+  let saved = null; try { saved = localStorage.getItem("airtalk_ws"); } catch (e) {}
+  const host = location.hostname && location.protocol.startsWith("http") ? location.hostname : "localhost";
+  $("wsUrl").value = saved || `ws://${host}:8765`;
+  buildDemo(); setMode("write"); setCaps(false); renderText(); drawSketch(); resetGauges();
+  S.wantConn = true; connect();     // auto-connect; the button toggles it
 })();
 </script>
 </body>
