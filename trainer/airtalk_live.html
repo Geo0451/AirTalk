@@ -234,6 +234,14 @@
   #applyNote { font-size: 12px; color: var(--ok); opacity: 0; transition: opacity .25s; align-self: center; }
   #applyNote.show { opacity: 1; }
 
+  /* ---- autocomplete ghost text + voice ---- */
+  .ghost { color: var(--dim); opacity: .55; }
+  .ghost .first { opacity: 1; color: #9fb3c8; border-bottom: 1px dashed var(--dim); }
+  #llmInfo.ready { color: var(--ok); } #llmInfo.offline { color: var(--bad); }
+  #voiceBtn { font-size: 16px; }
+  #voiceBtn.off { opacity: .45; }
+  #voiceBtn.blocked { border-color: var(--bad); }
+
   /* ---- teach-a-gesture ---- */
   .maprow.hasteach { grid-template-columns: 1fr auto auto; }
   .small { padding: 3px 10px; font-size: 12px; }
@@ -274,6 +282,7 @@
   <span class="pill write" id="modePill"><span class="dot"></span><span id="modeTxt">WRITE MODE</span></span>
   <span class="pill" id="capsPill" title="case state">abc</span>
   <span class="grow"></span>
+  <button class="iconbtn" id="voiceBtn" title="Read finished words aloud" aria-label="Voice">&#128266;</button>
   <button class="iconbtn" id="settingsBtn" title="Remap gestures & thresholds" aria-label="Settings">
     <span id="gearIcon">&#9881;&#65039;</span><span class="dirty"></span>
   </button>
@@ -287,7 +296,7 @@
 <main>
   <div class="col">
     <section class="card">
-      <h2><span>Text</span><span id="cursorInfo"></span></h2>
+      <h2><span>Text</span><span><span id="llmInfo"></span> <span id="cursorInfo"></span></span></h2>
       <div id="text" aria-live="polite"></div>
     </section>
     <section class="card">
@@ -295,6 +304,13 @@
       <div class="sketchwrap">
         <canvas id="sketch" width="900" height="460"></canvas>
         <div id="big"></div>
+      </div>
+    </section>
+    <section class="card">
+      <h2><span>How it works</span></h2>
+      <div class="legend" id="legend">
+        <b>Write</b><span>touch, draw a character, release</span>
+        <b>Gesture mode</b><span>tap, release, touch again quickly and hold; release to leave</span>
       </div>
     </section>
   </div>
@@ -338,6 +354,17 @@
 
     <h3>Sensitivity</h3>
     <div id="threshRows"></div>
+
+    <h3>Voice</h3>
+    <div class="checkrow"><span>Read each finished word aloud</span><input type="checkbox" id="chkVoice"></div>
+    <div class="thresh">
+      <div class="row"><span>Speaking speed</span><span class="val" id="val-rate"></span></div>
+      <input type="range" id="slRate" min="0.6" max="1.8" step="0.05">
+      <div class="note">Only words are spoken (after a space, Enter or autocomplete), never gesture names.</div>
+    </div>
+    <div class="maprow"><span class="gname">Voice output</span>
+      <select id="selVoiceMode"><option value="auto">Auto (browser, else server)</option><option value="browser">Browser</option><option value="server">Server (spd-say on the AirTalk machine)</option></select></div>
+    <div class="checkrow"><span id="voiceInfo" style="color:var(--dim);font-size:12px"></span><button id="testVoice" class="small">Test voice</button></div>
 
     <h3>Orientation</h3>
     <div class="checkrow"><span>Flip up / down</span><input type="checkbox" id="chkFlipUD"></div>
@@ -399,7 +426,7 @@ const THRESH_UI = [
 const S = {
   text: "", cursor: 0, caps: false, mode: "write", ws: null, wantConn: false, retry: null,
   config: { thresholds: { ...DEFAULT_THRESHOLDS }, mapping: { ...DEFAULT_MAPPING }, gestures: {}, actions: {}, learned: {} },
-  teach: null, teachDone: null,
+  teach: null, teachDone: null, suggest: null, llm: "",
   restoredThisConnection: false,
 };
 
@@ -423,6 +450,15 @@ function renderText() {
   const caret = document.createElement("span");
   caret.className = "caret"; caret.id = "caret";
   el.appendChild(caret);
+  // autocomplete ghost: only valid for the exact cursor position the server computed it for
+  const sg = S.suggest;
+  if (sg && sg.text && sg.at === c) {
+    const m = sg.text.match(/^(\s*\S*)([\s\S]*)$/);
+    const g = document.createElement("span"); g.className = "ghost";
+    const f = document.createElement("span"); f.className = "first"; f.textContent = m[1];
+    g.appendChild(f); g.appendChild(document.createTextNode(m[2]));
+    el.appendChild(g);
+  }
   addText(S.text.slice(c));
   if (!S.text) {
     const ph = document.createElement("span");
@@ -430,6 +466,13 @@ function renderText() {
     el.appendChild(ph);
   }
   $("cursorInfo").textContent = S.text ? `cursor ${c}/${S.text.length}` : "";
+  renderLlm();
+}
+function renderLlm() {
+  const el = $("llmInfo"), st = S.llm;
+  el.className = st;
+  el.textContent = st === "ready" ? "autocomplete ready" : st === "thinking" ? "thinking\u2026"
+    : st === "loading" ? "loading model\u2026" : st === "offline" ? "autocomplete offline (is Ollama running?)" : "";
 }
 function nudgeCaret() {
   const c = $("caret"); if (!c) return;
@@ -779,6 +822,10 @@ function handle(m) {
       break;
     case "text": S.text = m.text; S.cursor = m.cursor; renderText(); break;
     case "caps": setCaps(m.on); break;
+    case "suggest": S.suggest = m; renderText(); break;
+    case "llm": S.llm = m.status; renderLlm(); break;
+    case "speak": speakWord(m.word); break;
+    case "voice": S.voiceEngine = m.engine; voiceUi(); break;
     case "mode": setMode(m.mode); break;
     case "gest": if (S.mode === "gesture") updateGauges(m); break;
     case "gesture": fireGesture(m); break;
@@ -789,6 +836,67 @@ function handle(m) {
     case "clear": pts = []; drawSketch(); break;
   }
 }
+
+// ------------------------------------------------------------------ voice (browser speech)
+// Browsers only allow speech after the user has interacted with the page once, so the first click or
+// key press "unlocks" it; the speaker button turns red if a word was refused before that.
+const V = { on: true, rate: 1, pref: "auto", unlocked: false };
+function voiceLoad() {
+  try { const v = JSON.parse(localStorage.getItem("airtalk_voice")); if (v) { V.on = v.on !== false; V.rate = v.rate || 1; V.pref = v.pref || "auto"; } } catch (e) {}
+}
+function voiceSave() { try { localStorage.setItem("airtalk_voice", JSON.stringify({ on: V.on, rate: V.rate, pref: V.pref })); } catch (e) {} }
+function voiceSupported() { return "speechSynthesis" in window && "SpeechSynthesisUtterance" in window; }
+function voiceCount() { return voiceSupported() ? speechSynthesis.getVoices().length : 0; }
+// Which route actually speaks: the browser's own voices, or the AirTalk server (spd-say / espeak-ng).
+function voiceRoute() {
+  if (!V.on) return "off";
+  if (V.pref === "browser" || V.pref === "server") return V.pref;
+  return voiceCount() > 0 ? "browser" : "server";
+}
+function syncServerVoice() {  // tell the server whether IT should speak
+  sendWs({ type: "voice_set", server: voiceRoute() === "server", rate: V.rate });
+}
+function voiceUi() {
+  const b = $("voiceBtn");
+  b.classList.toggle("off", !V.on);
+  b.innerHTML = V.on ? "&#128266;" : "&#128263;";
+  b.title = V.on ? "Voice on: finished words are read aloud (click to mute)" : "Voice muted (click to turn on)";
+  $("chkVoice").checked = V.on; $("slRate").value = V.rate; $("val-rate").textContent = V.rate.toFixed(2) + "x";
+  $("selVoiceMode").value = V.pref;
+  const n = voiceCount(), route = voiceRoute(), eng = S.voiceEngine;
+  const via = route === "off" ? "muted" : route === "browser" ? "the browser" : "the server" + (eng && eng !== "none" ? ` (${eng})` : "");
+  let txt = `Speaking via ${via}. Browser voices: ${n}. Server engine: ${eng || "unknown (not connected)"}.`;
+  if (route === "server" && eng === "none") txt = "The server has neither spd-say nor espeak-ng, so nothing can speak. Install one, or pick Browser.";
+  else if (route === "browser" && n === 0) txt = "The browser reports no voices, so nothing will speak. Pick Server or Auto.";
+  $("voiceInfo").textContent = txt;
+  syncServerVoice();
+}
+function speakWord(w) {
+  if (voiceRoute() !== "browser" || !voiceSupported() || !w) return;  // server route: the server speaks
+  const u = new SpeechSynthesisUtterance(w);
+  u.rate = V.rate;
+  u.onerror = (e) => { if (e.error === "not-allowed") $("voiceBtn").classList.add("blocked"); };
+  u.onstart = () => $("voiceBtn").classList.remove("blocked");
+  speechSynthesis.speak(u);
+}
+function unlockVoice() {
+  if (V.unlocked || !voiceSupported()) return;
+  V.unlocked = true;
+  const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u);
+  $("voiceBtn").classList.remove("blocked");
+}
+["pointerdown", "keydown"].forEach((ev) => window.addEventListener(ev, unlockVoice, { once: true }));
+$("voiceBtn").onclick = () => { V.on = !V.on; if (!V.on && voiceSupported()) speechSynthesis.cancel(); voiceSave(); voiceUi(); };
+$("chkVoice").addEventListener("change", (e) => { V.on = e.target.checked; if (!V.on && voiceSupported()) speechSynthesis.cancel(); voiceSave(); voiceUi(); });
+$("slRate").addEventListener("input", (e) => { V.rate = Number(e.target.value); voiceSave(); voiceUi(); });
+$("selVoiceMode").addEventListener("change", (e) => { V.pref = e.target.value; voiceSave(); voiceUi(); });
+$("testVoice").onclick = () => {
+  const was = V.on; V.on = true; unlockVoice();
+  if (voiceRoute() === "server") sendWs({ type: "voice_test" }); else speakWord("Hello, this is AirTalk");
+  V.on = was;
+};
+if (voiceSupported()) speechSynthesis.addEventListener("voiceschanged", voiceUi);
+voiceLoad(); voiceUi();
 
 // ------------------------------------------------------------------ websocket
 function setConn(ok, txt) {
@@ -803,7 +911,7 @@ function connect() {
   let ws;
   try { ws = new WebSocket(url); } catch (e) { setConn(false, "bad address"); return; }
   S.ws = ws; S.restoredThisConnection = false; setConn(false, "connecting\u2026");
-  ws.onopen = () => setConn(true, "connected");
+  ws.onopen = () => { setConn(true, "connected"); voiceUi(); };
   ws.onmessage = (ev) => { try { handle(JSON.parse(ev.data)); } catch (e) { console.error(e); } };
   ws.onclose = () => {
     if (S.ws !== ws) return;
