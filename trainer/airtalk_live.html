@@ -112,26 +112,63 @@
   body.gesture #hud { opacity: 1; border-color: var(--gest); box-shadow: 0 0 0 1px var(--gest), 0 0 30px rgba(255,176,32,.18); }
   .hint { color: var(--dim); font-size: 13px; margin: -2px 0 12px; min-height: 1.4em; }
   body.gesture .hint { color: var(--gest); font-weight: 600; }
-  #gcards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-  @media (max-width: 1100px) and (min-width: 921px), (max-width: 480px) { #gcards { grid-template-columns: repeat(2, 1fr); } }
+  /* Gesture pad: laid out like the motions themselves. Flicks on the four sides of the thrust, a
+     roll rail on each outer edge. Every tile fills in the direction of its own motion. */
+  #gcards {
+    display: grid; gap: 8px; align-items: stretch;
+    grid-template-columns: 58px minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 1fr) 58px;
+    grid-template-areas: "ccw . up . cw" "ccw left mid right cw" "ccw . down . cw";
+  }
+  .g-ccw { grid-area: ccw; } .g-cw { grid-area: cw; }
+  .g-up { grid-area: up; } .g-down { grid-area: down; }
+  .g-left { grid-area: left; } .g-right { grid-area: right; }
+  .g-mid { grid-area: mid; display: grid; grid-template-rows: 1fr 1fr; gap: 8px; }
+  .g-cap { grid-column: 1 / -1; font-size: 11px; color: var(--dim); margin-top: 6px; }
+  .g-extra { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; }
   .gcard {
-    position: relative; overflow: hidden; isolation: isolate; text-align: left;
-    background: var(--card2); border: 1px solid var(--line); border-radius: 12px; padding: 9px 10px;
-    min-height: 68px; display: flex; flex-direction: column; justify-content: center;
+    position: relative; overflow: hidden; isolation: isolate; text-align: center; min-width: 0;
+    background: var(--card2); border: 1px solid var(--line); border-radius: 12px; padding: 8px 6px;
+    min-height: 62px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
   }
   .gcard::before {
-    content: ""; position: absolute; inset: 0; z-index: -1; background: var(--gest);
-    opacity: calc(var(--lvl, 0) * .55); transition: opacity .06s linear;
+    content: ""; position: absolute; inset: 0; z-index: -1; background: var(--gest); opacity: .55;
+    transition: transform .06s linear, opacity .06s linear;
   }
-  .gcard .motion { font-size: 10px; letter-spacing: .5px; color: var(--dim); font-weight: 700; text-transform: uppercase; }
-  .gcard .action { font-size: 14px; font-weight: 700; margin-top: 2px; line-height: 1.2; }
+  .f-up::before    { transform-origin: 50% 100%; transform: scaleY(var(--lvl, 0)); }
+  .f-down::before  { transform-origin: 50% 0;    transform: scaleY(var(--lvl, 0)); }
+  .f-left::before  { transform-origin: 100% 50%; transform: scaleX(var(--lvl, 0)); }
+  .f-right::before { transform-origin: 0 50%;    transform: scaleX(var(--lvl, 0)); }
+  .f-core::before  { transform-origin: 50% 50%;  transform: scale(var(--lvl, 0)); }
+  .f-fade::before  { opacity: calc(var(--lvl, 0) * .55); }
+  .gcard .ic { font-size: 20px; line-height: 1; color: var(--dim); }
+  .gcard .motion { font-size: 10px; letter-spacing: .4px; color: var(--dim); font-weight: 700; }
+  .gcard .action { font-size: 13px; font-weight: 700; line-height: 1.2; overflow-wrap: break-word; }
   .gcard.unassigned .action { color: var(--dim); font-weight: 500; font-style: italic; }
+  .g-roll { padding: 8px 2px; }
+  .g-roll .ic { font-size: 28px; transform: rotate(calc(var(--lvl, 0) * var(--rot, 0deg))); }
+  .g-roll .action { font-size: 11px; }
+  .g-mid .gcard { min-height: 54px; }
+  .g-chip { flex: 1 1 96px; min-height: 52px; }
+  .gcard.taught::after {
+    content: ""; position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--write); box-shadow: 0 0 6px var(--write);
+  }
+  .gcard .ic, .gcard .motion { color: #a9b4c2; }
+  @media (max-width: 480px) {
+    #gcards { gap: 6px; grid-template-columns: 38px minmax(0, 1fr) minmax(0, 1.5fr) minmax(0, 1fr) 38px; }
+    .gcard { padding: 6px 2px; }
+    .gcard .motion { display: none; }
+    .g-chip .motion { display: block; }
+    .gcard .action { font-size: 10.5px; overflow-wrap: break-word; }
+    .g-roll .action { font-size: 9.5px; }
+    .g-roll .ic { font-size: 22px; }
+  }
   .gcard.fire { animation: cardfire .5s ease-out; }
   @keyframes cardfire {
     0% { background: var(--gest); transform: scale(1.04); box-shadow: 0 0 28px var(--gest); }
     100% { transform: scale(1); }
   }
-  .gcard.fire .motion, .gcard.fire .action { color: #1a1200; }
+  .gcard.fire .motion, .gcard.fire .action, .gcard.fire .ic { color: #1a1200; }
 
   #toast {
     position: absolute; left: 50%; top: 42%; transform: translate(-50%, -50%) scale(.8);
@@ -258,13 +295,6 @@
       <div class="sketchwrap">
         <canvas id="sketch" width="900" height="460"></canvas>
         <div id="big"></div>
-      </div>
-    </section>
-    <section class="card">
-      <h2><span>How it works</span></h2>
-      <div class="legend" id="legend">
-        <b>Write</b><span>touch, draw a character, release</span>
-        <b>Gesture mode</b><span>tap, release, touch again quickly and hold; release to leave</span>
       </div>
     </section>
   </div>
@@ -437,24 +467,53 @@ function allIds() {
 }
 function iconFor(gid) { return G_ICON[gid] || CUSTOM_ICON; }
 
+// How each factory motion sits on the pad. cls = grid slot + which way its fill grows.
+const PAD = {
+  flick_up:    { cls: "g-up f-up",       name: "flick up",    ic: "\u2191" },
+  flick_down:  { cls: "g-down f-down",   name: "flick down",  ic: "\u2193" },
+  flick_left:  { cls: "g-left f-left",   name: "flick left",  ic: "\u2190" },
+  flick_right: { cls: "g-right f-right", name: "flick right", ic: "\u2192" },
+  thrust_fwd:  { cls: "f-core",          name: "thrust out",  ic: "\u2197" },
+  thrust_back: { cls: "f-fade",          name: "pull in",     ic: "\u2199" },
+  twist_ccw:   { cls: "g-ccw g-roll f-up", name: "", ic: "\u21ba", rot: "-60deg" },
+  twist_cw:    { cls: "g-cw g-roll f-up",  name: "", ic: "\u21bb", rot: "60deg" },
+};
+
+// short label for a tile: drop "(...)" asides, and say "unassigned" instead of the dash
+function padAction(aid) { return aid === "none" ? "unassigned" : actionLabel(aid).replace(/\s*\(.*\)/, ""); }
+
+function makeCard(gid) {
+  const pad = PAD[gid] || { cls: "g-chip f-fade", name: gestureLabel(gid), ic: CUSTOM_ICON };
+  const action = S.config.mapping[gid] || "none";
+  const card = document.createElement("div");
+  card.className = "gcard " + pad.cls + (action === "none" ? " unassigned" : "") + ((S.config.learned || {})[gid] ? " taught" : "");
+  card.id = "gc-" + gid;
+  card.style.setProperty("--lvl", "0");
+  if (pad.rot) card.style.setProperty("--rot", pad.rot);
+  const ic = document.createElement("div"); ic.className = "ic"; ic.textContent = pad.ic;
+  card.appendChild(ic);
+  if (pad.name) { const m = document.createElement("div"); m.className = "motion"; m.textContent = pad.name; card.appendChild(m); }
+  const act = document.createElement("div");
+  act.className = "action"; act.id = "gc-" + gid + "-action"; act.textContent = padAction(action);
+  card.appendChild(act);
+  card.title = gestureLabel(gid);
+  return card;
+}
+
 function renderCards() {
   const wrap = $("gcards");
   wrap.textContent = "";
-  allIds().forEach((gid) => {
-    const action = S.config.mapping[gid] || "none";
-    const card = document.createElement("div");
-    card.className = "gcard" + (action === "none" ? " unassigned" : "");
-    card.id = "gc-" + gid;
-    card.style.setProperty("--lvl", "0");
-    const motion = document.createElement("div");
-    motion.className = "motion";
-    motion.textContent = iconFor(gid) + " " + (gestureLabel(gid).replace(/\s*\(.*\)/, ""));
-    const act = document.createElement("div");
-    act.className = "action"; act.id = "gc-" + gid + "-action";
-    act.textContent = actionLabel(action);
-    card.appendChild(motion); card.appendChild(act);
-    wrap.appendChild(card);
-  });
+  ["twist_ccw", "flick_up", "twist_cw", "flick_left", "flick_right", "flick_down"].forEach((g) => wrap.appendChild(makeCard(g)));
+  const mid = document.createElement("div"); mid.className = "g-mid";
+  mid.appendChild(makeCard("thrust_fwd")); mid.appendChild(makeCard("thrust_back"));
+  wrap.appendChild(mid);
+  const custom = allIds().filter((g) => !PAD[g]);
+  if (custom.length) {
+    const cap = document.createElement("div"); cap.className = "g-cap"; cap.textContent = "Your gestures";
+    const row = document.createElement("div"); row.className = "g-extra";
+    custom.forEach((g) => row.appendChild(makeCard(g)));
+    wrap.appendChild(cap); wrap.appendChild(row);
+  }
 }
 function setLvl(gid, v) {
   const el = $("gc-" + gid); if (el) el.style.setProperty("--lvl", Math.min(1, Math.max(0, v)).toFixed(3));
