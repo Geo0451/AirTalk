@@ -197,6 +197,35 @@
   #applyNote { font-size: 12px; color: var(--ok); opacity: 0; transition: opacity .25s; align-self: center; }
   #applyNote.show { opacity: 1; }
 
+  /* ---- teach-a-gesture ---- */
+  .maprow.hasteach { grid-template-columns: 1fr auto auto; }
+  .small { padding: 3px 10px; font-size: 12px; }
+  .newrow { display: flex; gap: 8px; margin: 10px 0 4px; }
+  .newrow input {
+    flex: 1; min-width: 0; background: var(--card2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 10px; font: inherit;
+  }
+  .teachbox { background: var(--card2); border: 1px solid var(--gest); border-radius: 12px; padding: 12px 14px; margin: 4px 0 10px; }
+  .teachbox .ttl { font-weight: 700; font-size: 14px; }
+  .reps { display: flex; gap: 6px; margin: 10px 0 8px; align-items: center; }
+  .reps .rep { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line); background: transparent; }
+  .reps .rep.done { background: var(--gest); border-color: var(--gest); }
+  .reps .cons { margin-left: 8px; font: 12px ui-monospace, Menlo, Consolas, monospace; color: var(--dim); }
+  .tstatus { font-size: 13px; color: var(--dim); min-height: 1.4em; }
+  .tstatus.live { color: var(--gest); font-weight: 600; }
+  .terr { font-size: 13px; color: var(--bad); margin-top: 4px; }
+  .tnote { font-size: 12px; color: var(--dim); margin-top: 4px; }
+  .tdone { font-size: 13px; color: var(--ok); margin: 4px 0 10px; }
+  .tbtns { display: flex; gap: 8px; margin-top: 10px; }
+  button:disabled { opacity: .4; cursor: default; }
+  button:disabled:hover { border-color: var(--line); }
+  .taught { padding: 8px 0; border-top: 1px solid var(--line); }
+  .taught .top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 13px; }
+  .taught .meta { font: 12px ui-monospace, Menlo, Consolas, monospace; color: var(--dim); }
+  .taught .ctl { display: grid; grid-template-columns: auto 1fr auto auto; gap: 8px; align-items: center; margin-top: 6px; font-size: 12px; color: var(--dim); }
+  .taught input[type="range"] { accent-color: var(--gest); width: 100%; }
+  .sub2 { color: var(--dim); font-size: 12px; margin: -4px 0 8px; }
+
   @media (prefers-reduced-motion: reduce) {
     body.gesture::before, #modePill.gesture, .caret { animation: none !important; }
   }
@@ -271,6 +300,12 @@
     <h3>Remap: which motion does what</h3>
     <div id="mapRows"></div>
 
+    <h3>Teach a gesture</h3>
+    <div class="sub2">Show the pen a motion about 5 times and it learns it. Works in gesture mode (tap, release, touch again and hold); pause briefly between reps. Saved on the server.</div>
+    <div id="teachPanel"></div>
+    <div class="newrow"><input id="newName" placeholder="Name a new gesture, e.g. Shake" maxlength="24" aria-label="New gesture name"><button id="newBtn">Teach new</button></div>
+    <div id="taughtRows"></div>
+
     <h3>Sensitivity</h3>
     <div id="threshRows"></div>
 
@@ -301,6 +336,7 @@ const G_ICON = {
   flick_up: "\u2191", flick_down: "\u2193", flick_left: "\u2190", flick_right: "\u2192",
   thrust_fwd: "\u2197", thrust_back: "\u2199", twist_cw: "\u21bb", twist_ccw: "\u21ba",
 };
+const CUSTOM_ICON = "\u2726";
 const G_ORDER = ["flick_up", "flick_down", "flick_left", "flick_right",
                   "thrust_fwd", "thrust_back", "twist_ccw", "twist_cw"];
 // Mirrors the server's defaults (Config / THRESHOLD_FIELDS / DEFAULT_MAPPING in airtalk_server.py).
@@ -319,8 +355,8 @@ const THRESH_UI = [
     note: "Lower = easier to trigger a flick, but more accidental fires." },
   { id: "thrust_g", label: "Thrust strength", unit: "g", min: 0.15, max: 2.0, step: 0.05,
     note: "Lower = a gentler push/pull counts as a thrust." },
-  { id: "twist_deg", label: "Twist step size", unit: "\u00b0/step", min: 10, max: 120, step: 5,
-    note: "Degrees of rotation per cursor step." },
+  { id: "twist_deg", label: "Twist size", unit: "\u00b0", min: 10, max: 120, step: 5,
+    note: "How far you must twist for it to count. One twist is one move." },
   { id: "twist_min_dps", label: "Twist min speed", unit: "dps", min: 20, max: 300, step: 5,
     note: "Twists slower than this are ignored (keeps the slow untwist from counting)." },
   { id: "gesture_gap", label: "Gesture entry gap", unit: "s", min: 0.1, max: 2.0, step: 0.05,
@@ -332,7 +368,8 @@ const THRESH_UI = [
 // ------------------------------------------------------------------ state
 const S = {
   text: "", cursor: 0, caps: false, mode: "write", ws: null, wantConn: false, retry: null,
-  config: { thresholds: { ...DEFAULT_THRESHOLDS }, mapping: { ...DEFAULT_MAPPING }, gestures: {}, actions: {} },
+  config: { thresholds: { ...DEFAULT_THRESHOLDS }, mapping: { ...DEFAULT_MAPPING }, gestures: {}, actions: {}, learned: {} },
+  teach: null, teachDone: null,
   restoredThisConnection: false,
 };
 
@@ -381,6 +418,7 @@ function setMode(m) {
     : "Tap, release, then touch again quickly and <b>hold</b> to enter gesture mode.";
   $("gstate").textContent = g ? "ACTIVE" : "";
   if (!g) resetGauges();
+  if ($("overlay").classList.contains("open")) buildTeach();
 }
 function setCaps(on) {
   S.caps = !!on;
@@ -392,10 +430,17 @@ function setCaps(on) {
 function actionLabel(id) { return (S.config.actions && S.config.actions[id]) || id; }
 function gestureLabel(id) { return (S.config.gestures && S.config.gestures[id]) || id; }
 
+// factory motions first, then any custom (taught) gestures
+function allIds() {
+  const L = S.config.learned || {};
+  return G_ORDER.concat(Object.keys(L).filter((id) => L[id].custom && !G_ORDER.includes(id)));
+}
+function iconFor(gid) { return G_ICON[gid] || CUSTOM_ICON; }
+
 function renderCards() {
   const wrap = $("gcards");
   wrap.textContent = "";
-  G_ORDER.forEach((gid) => {
+  allIds().forEach((gid) => {
     const action = S.config.mapping[gid] || "none";
     const card = document.createElement("div");
     card.className = "gcard" + (action === "none" ? " unassigned" : "");
@@ -403,7 +448,7 @@ function renderCards() {
     card.style.setProperty("--lvl", "0");
     const motion = document.createElement("div");
     motion.className = "motion";
-    motion.textContent = (G_ICON[gid] || "") + " " + (gestureLabel(gid).replace(/\s*\(.*\)/, ""));
+    motion.textContent = iconFor(gid) + " " + (gestureLabel(gid).replace(/\s*\(.*\)/, ""));
     const act = document.createElement("div");
     act.className = "action"; act.id = "gc-" + gid + "-action";
     act.textContent = actionLabel(action);
@@ -415,7 +460,7 @@ function setLvl(gid, v) {
   const el = $("gc-" + gid); if (el) el.style.setProperty("--lvl", Math.min(1, Math.max(0, v)).toFixed(3));
 }
 function resetGauges() {
-  G_ORDER.forEach((g) => setLvl(g, 0));
+  allIds().forEach((g) => setLvl(g, 0));
   $("state").textContent = "idle"; $("state").className = "";
   ["d-ud", "d-lr", "d-fw"].forEach((i) => ($(i).textContent = "0.00"));
   $("d-tw").textContent = "0.0\u00b0";
@@ -430,6 +475,7 @@ function updateGauges(m) {
   $("d-lr").textContent = m.lr.toFixed(2);
   $("d-fw").textContent = m.fw.toFixed(2);
   $("d-tw").textContent = m.tw_deg.toFixed(1) + "\u00b0";
+  if (m.lg) Object.keys(m.lg).forEach((id) => setLvl(id, m.lg[id] / 1.2));  // taught gestures
   const st = $("state");
   st.textContent = m.state === "warmup" ? "starting\u2026" : m.state === "armed" ? "ready" : m.state;
   st.className = m.state;
@@ -474,7 +520,7 @@ let sendTimer = null;
 
 function openSettings() {
   pending = { thresholds: { ...S.config.thresholds }, mapping: { ...S.config.mapping } };
-  buildMapRows(); buildThreshRows();
+  buildMapRows(); buildThreshRows(); buildTeach();
   $("chkFlipUD").checked = !!pending.thresholds.flip_ud;
   $("chkFlipLR").checked = !!pending.thresholds.flip_lr;
   $("chkTwistSign").checked = pending.thresholds.twist_sign < 0;
@@ -486,10 +532,11 @@ function closeSettings() { $("overlay").classList.remove("open"); pending = null
 function buildMapRows() {
   const wrap = $("mapRows"); wrap.textContent = "";
   const actionIds = Object.keys(S.config.actions || {});
-  G_ORDER.forEach((gid) => {
-    const row = document.createElement("div"); row.className = "maprow";
+  allIds().forEach((gid) => {
+    const row = document.createElement("div"); row.className = "maprow hasteach";
     const name = document.createElement("div"); name.className = "gname";
-    name.innerHTML = `<span class="ic">${G_ICON[gid] || ""}</span><span>${gestureLabel(gid)}</span>`;
+    name.innerHTML = `<span class="ic"></span><span></span>`;
+    name.firstChild.textContent = iconFor(gid); name.lastChild.textContent = gestureLabel(gid);
     const sel = document.createElement("select"); sel.id = "sel-" + gid;
     actionIds.forEach((aid) => {
       const opt = document.createElement("option");
@@ -498,7 +545,11 @@ function buildMapRows() {
       sel.appendChild(opt);
     });
     sel.addEventListener("change", () => { pending.mapping[gid] = sel.value; scheduleSend(); });
-    row.appendChild(name); row.appendChild(sel);
+    const tb = document.createElement("button"); tb.className = "small"; tb.id = "teach-" + gid;
+    tb.textContent = (S.config.learned || {})[gid] ? "Retrain" : "Teach";
+    tb.title = "Show the pen this motion a few times";
+    tb.addEventListener("click", () => sendWs({ type: "teach_start", id: gid }));
+    row.appendChild(name); row.appendChild(sel); row.appendChild(tb);
     wrap.appendChild(row);
   });
 }
@@ -523,6 +574,84 @@ function buildThreshRows() {
     wrap.appendChild(box);
   });
 }
+// ---- teach-a-gesture UI ----
+function sendWs(obj) { if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify(obj)); }
+
+function buildTeach() {
+  const box = $("teachPanel"); box.textContent = "";
+  const t = S.teach;
+  if (!t) {
+    if (S.teachDone) {
+      const d = document.createElement("div"); d.className = "tdone";
+      d.textContent = `Saved \u201c${S.teachDone.label}\u201d (${S.teachDone.reps} reps, ${Math.round(S.teachDone.consistency * 100)}% consistent). Try it in gesture mode.`
+        + (S.teachDone.note ? " " + S.teachDone.note : "");
+      box.appendChild(d);
+    }
+    if (S.teachError) {
+      const e = document.createElement("div"); e.className = "terr"; e.textContent = S.teachError; box.appendChild(e);
+    }
+  } else {
+    const wrap = document.createElement("div"); wrap.className = "teachbox";
+    const ttl = document.createElement("div"); ttl.className = "ttl"; ttl.textContent = "Teaching: " + t.label;
+    const reps = document.createElement("div"); reps.className = "reps";
+    for (let i = 0; i < t.target; i++) {
+      const r = document.createElement("span"); r.className = "rep" + (i < t.reps ? " done" : ""); reps.appendChild(r);
+    }
+    const cons = document.createElement("span"); cons.className = "cons";
+    cons.textContent = t.reps >= 2 && t.consistency != null ? `consistency ${Math.round(t.consistency * 100)}%` : `${t.reps} / ${t.target}`;
+    reps.appendChild(cons);
+    const st = document.createElement("div"); st.className = "tstatus";
+    if (S.mode !== "gesture") st.textContent = "Not in gesture mode yet: tap, release, then touch again and hold.";
+    else if (t.state === "recording") { st.textContent = "Recording\u2026"; st.classList.add("live"); }
+    else { st.textContent = t.reps >= t.target ? "That's enough: press Finish, or keep going." : "Ready: do the motion now, then pause."; st.classList.add("live"); }
+    wrap.appendChild(ttl); wrap.appendChild(reps); wrap.appendChild(st);
+    if (t.error) { const e = document.createElement("div"); e.className = "terr"; e.textContent = t.error; wrap.appendChild(e); }
+    else if (t.note) { const n = document.createElement("div"); n.className = "tnote"; n.textContent = t.note; wrap.appendChild(n); }
+    const b = document.createElement("div"); b.className = "tbtns";
+    const undo = document.createElement("button"); undo.textContent = "Undo last"; undo.disabled = t.reps === 0;
+    undo.onclick = () => sendWs({ type: "teach_undo" });
+    const fin = document.createElement("button"); fin.textContent = "Finish"; fin.disabled = t.reps < (t.min_reps || 3);
+    fin.onclick = () => sendWs({ type: "teach_finish" });
+    const can = document.createElement("button"); can.textContent = "Cancel";
+    can.onclick = () => sendWs({ type: "teach_cancel" });
+    b.appendChild(undo); b.appendChild(fin); b.appendChild(can); wrap.appendChild(b);
+    box.appendChild(wrap);
+  }
+  // taught gestures: sensitivity + retrain / remove
+  const rows = $("taughtRows"); rows.textContent = "";
+  const L = S.config.learned || {};
+  Object.keys(L).forEach((gid) => {
+    const g = L[gid];
+    const row = document.createElement("div"); row.className = "taught";
+    const top = document.createElement("div"); top.className = "top";
+    const nm = document.createElement("span"); nm.textContent = iconFor(gid) + " " + g.label + (g.custom ? "" : " (taught, replaces factory)");
+    const meta = document.createElement("span"); meta.className = "meta";
+    meta.textContent = `${g.kind === "rot" ? "rotation" : "push"} \u00b7 ${g.reps} reps \u00b7 ${Math.round(g.consistency * 100)}%`;
+    top.appendChild(nm); top.appendChild(meta);
+    const ctl = document.createElement("div"); ctl.className = "ctl";
+    const lab = document.createElement("span"); lab.textContent = "Sensitivity";
+    const sl = document.createElement("input"); sl.type = "range"; sl.min = 0.4; sl.max = 2.5; sl.step = 0.05; sl.value = g.sens;
+    sl.title = "Higher = triggers on a gentler motion";
+    sl.addEventListener("change", () => sendWs({ type: "gesture_set", id: gid, sensitivity: Number(sl.value) }));
+    const rt = document.createElement("button"); rt.className = "small"; rt.textContent = "Retrain";
+    rt.onclick = () => sendWs({ type: "teach_start", id: gid });
+    const rm = document.createElement("button"); rm.className = "small"; rm.textContent = g.custom ? "Delete" : "Back to factory";
+    rm.onclick = () => sendWs({ type: "gesture_delete", id: gid });
+    ctl.appendChild(lab); ctl.appendChild(sl);
+    // keep the two buttons together in the last grid cell
+    const bw = document.createElement("span"); bw.style.cssText = "display:flex;gap:6px;grid-column:3 / 5;justify-content:flex-end";
+    bw.appendChild(rt); bw.appendChild(rm); ctl.appendChild(bw);
+    row.appendChild(top); row.appendChild(ctl); rows.appendChild(row);
+  });
+}
+$("newBtn").onclick = () => {
+  const label = $("newName").value.trim();
+  if (!label) { $("newName").focus(); return; }
+  S.teachDone = null; S.teachError = null;
+  sendWs({ type: "teach_start", label }); $("newName").value = "";
+};
+$("newName").addEventListener("keydown", (e) => { if (e.key === "Enter") $("newBtn").click(); });
+
 function scheduleSend() {
   clearTimeout(sendTimer);
   sendTimer = setTimeout(sendPending, 150);
@@ -545,7 +674,7 @@ $("chkFlipUD").addEventListener("change", (e) => { pending.thresholds.flip_ud = 
 $("chkFlipLR").addEventListener("change", (e) => { pending.thresholds.flip_lr = e.target.checked; scheduleSend(); });
 $("chkTwistSign").addEventListener("change", (e) => { pending.thresholds.twist_sign = e.target.checked ? -1 : 1; scheduleSend(); });
 $("resetBtn").onclick = () => {
-  pending = { thresholds: { ...DEFAULT_THRESHOLDS }, mapping: { ...DEFAULT_MAPPING } };
+  pending = { thresholds: { ...DEFAULT_THRESHOLDS }, mapping: { ...S.config.mapping, ...DEFAULT_MAPPING } };
   buildMapRows(); buildThreshRows();
   $("chkFlipUD").checked = false; $("chkFlipLR").checked = false; $("chkTwistSign").checked = false;
   sendPending();
@@ -553,12 +682,14 @@ $("resetBtn").onclick = () => {
 
 // ------------------------------------------------------------------ message handling
 function applyConfig(m) {
-  S.config = { thresholds: m.thresholds, mapping: m.mapping, gestures: m.gestures, actions: m.actions };
+  S.config = { thresholds: m.thresholds, mapping: m.mapping, gestures: m.gestures, actions: m.actions, learned: m.learned || {} };
+  S.teach = m.teach && m.teach.state !== "idle" ? m.teach : null;
   renderCards();
   if ($("overlay").classList.contains("open")) {
     // a change from elsewhere (another tab/device) arrived while the panel is open; refresh it,
     // but don't clobber a field the user is mid-drag on by only rebuilding when nothing pending.
     if (!sendTimer) { pending = { thresholds: { ...m.thresholds }, mapping: { ...m.mapping } }; buildMapRows(); buildThreshRows(); }
+    buildTeach();
   } else {
     $("settingsBtn").classList.remove("dirty");
   }
@@ -581,6 +712,12 @@ function applyConfig(m) {
 function handle(m) {
   switch (m.type) {
     case "config": applyConfig(m); break;
+    case "teach":
+      if (m.state === "done") { S.teach = null; S.teachDone = m; S.teachError = null; }
+      else if (m.state === "idle") { S.teach = null; S.teachError = m.error || null; if (!m.error) S.teachDone = null; }
+      else { S.teach = m; S.teachDone = null; S.teachError = null; }
+      if ($("overlay").classList.contains("open")) buildTeach();
+      break;
     case "text": S.text = m.text; S.cursor = m.cursor; renderText(); break;
     case "caps": setCaps(m.on); break;
     case "mode": setMode(m.mode); break;

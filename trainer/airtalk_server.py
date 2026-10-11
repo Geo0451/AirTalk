@@ -41,6 +41,16 @@ thresholds (--flick-dps / --thrust-g / --twist-min-dps) -- or, easier, open the 
 the frontend: every threshold and the whole action mapping can be changed live from there, for
 any connected client, with no restart (see "live config" below).
 
+Teach-by-demonstration: any gesture (the 8 factory motions OR brand-new ones you name) can be
+(re)defined from the settings panel: press Teach, enter gesture mode, do the motion ~5 times with a
+pause between reps. The server records the peak rotation/acceleration direction of each rep in the
+SENSOR's own frame (so it doesn't depend on which way you face, or on `pen_axis`), averages them,
+and from then on matches live motion against that learned direction. Taught gestures are saved to
+<data>/gestures.json and reloaded at startup. Factory kinematics stay as the default for any
+gesture you haven't taught; "Back to factory" removes a taught override.
+
+Twists are single moves now (one twist = one event), not a stepping dial.
+
 Live config: the gesture->action mapping and every threshold live in a Config object on the server,
 not just in argparse. The CLI flags below only set the STARTING values. Any connected frontend can
 change them at any time (settings panel, gear icon); the change applies immediately to every
@@ -76,8 +86,11 @@ without it).
 """
 
 import argparse
+import json
 import math
+import os
 import sys
+import threading
 
 import numpy as np
 
@@ -319,6 +332,21 @@ class Config:
         self.args = args
         self.mapping = dict(DEFAULT_MAPPING)
         self.lock = threading.Lock()
+        self.learner = None  # set by live(); supplies custom gestures + taught state
+
+    def labels(self):
+        """Factory motions + any custom (taught) gestures, {id: label}."""
+        d = dict(GESTURE_META)
+        if self.learner:
+            d.update(self.learner.custom_labels())
+        return d
+
+    def label(self, gid):
+        return self.labels().get(gid, gid)
+
+    def mapping_copy(self):
+        with self.lock:
+            return dict(self.mapping)
 
     def action_for(self, gesture_name):
         with self.lock:
@@ -342,10 +370,15 @@ class Config:
             setattr(self.args, k, v)
         mp = msg.get("mapping")
         if isinstance(mp, dict):
+            known = self.labels()
             with self.lock:
                 for g, a in mp.items():
-                    if g in GESTURE_META and a in ACTION_META:
+                    if g in known and a in ACTION_META:
                         self.mapping[g] = a
+            if (
+                self.learner
+            ):  # custom gestures' actions persist with them (outside our lock)
+                self.learner.save()
 
     def snapshot(self):
         with self.lock:
@@ -354,8 +387,10 @@ class Config:
             "type": "config",
             "thresholds": {k: getattr(self.args, k) for k in THRESHOLD_FIELDS},
             "mapping": mapping,
-            "gestures": GESTURE_META,
+            "gestures": self.labels(),
             "actions": ACTION_META,
+            "learned": self.learner.summary() if self.learner else {},
+            "teach": self.learner.teach_msg() if self.learner else None,
         }
 
 
@@ -396,6 +431,15 @@ class GestureDetector:
         self.axis = self.axis / np.linalg.norm(self.axis)
         self.bias = np.asarray(meta["gyro_bias_dps"], float)
         self.acc_scale = float(meta["acc_scale"])
+        # Taught gestures (swapped in whole by Learner._publish, so a reader never sees a half-built
+        # dict): {id: {"kind": "rot"|"lin", "dir": unit 3-vector, "thr": float}}; ids that override
+        # a factory motion are in `overridden` and that motion's built-in detection is switched off.
+        self.learned = {}
+        self.overridden = frozenset()
+        self.w_dps = np.zeros(
+            3
+        )  # latest bias-corrected gyro (deg/s, sensor frame), for the Learner
+        self.lin_g = np.zeros(3)  # latest gravity-removed accel (g, sensor frame)
         self.reset([])
 
     # -- lifecycle ----------------------------------------------------------------------------
@@ -456,6 +500,7 @@ class GestureDetector:
             self.g += (1.0 - math.exp(-dt / 0.4)) * (a - self.g)
         u = self.g / max(float(np.linalg.norm(self.g)), 1e-6)
         lin = a - self.g
+        self.w_dps, self.lin_g = w, lin
 
         ax = self.axis
         f = ax - (ax @ u) * u
@@ -485,6 +530,19 @@ class GestureDetector:
             "thrust_fwd": max(0.0, thrust) / Tt,
             "thrust_back": max(0.0, -thrust) / Tt,
         }
+        for gid in self.overridden:
+            sc.pop(gid, None)
+        lg = {}
+        for gid, sig in self.learned.items():
+            v = w if sig["kind"] == "rot" else lin
+            n = float(np.linalg.norm(v))
+            proj = float(v @ sig["dir"])
+            # |v| * cos^2: both "how hard" and "how well aimed" count, so a big motion about some
+            # other axis doesn't fire this gesture.
+            lg[gid] = (
+                max(0.0, proj) * (max(0.0, proj) / n) / sig["thr"] if n > 1e-6 else 0.0
+            )
+        sc.update(lg)
 
         events = []
         if t >= self.active_from:
@@ -512,11 +570,26 @@ class GestureDetector:
                 for k, v in sc.items():
                     self.peaks[k] = max(self.peaks[k], v)
                 if t >= self.win_end:
-                    (n1, s1), (_, s2) = sorted(
-                        self.peaks.items(), key=lambda kv: -kv[1]
+                    # Taught gestures get first say: you showed the pen exactly what you mean, so a
+                    # clear winner among them beats the factory guesses (which, if the grip differs
+                    # from the pen-axis assumption, would otherwise "see" the same motion as
+                    # something else and veto it).
+                    lp = sorted(
+                        ((k, v) for k, v in self.peaks.items() if k in self.learned),
+                        key=lambda kv: -kv[1],
                     )[:2]
-                    if s1 >= 1.0 and s1 >= self.DOM * s2:
-                        events.append((n1, s1))
+                    if (
+                        lp
+                        and lp[0][1] >= 1.0
+                        and (len(lp) < 2 or lp[0][1] >= self.DOM * lp[1][1])
+                    ):
+                        events.append(lp[0])
+                    else:
+                        (n1, s1), (_, s2) = sorted(
+                            self.peaks.items(), key=lambda kv: -kv[1]
+                        )[:2]
+                        if s1 >= 1.0 and s1 >= self.DOM * s2:
+                            events.append((n1, s1))
                     self._lock(t)
             if self.state == "armed" and t >= self.tw_block_until:
                 self._twist(t, dt, tw_rate, yaw, pitch, events)
@@ -533,6 +606,8 @@ class GestureDetector:
             "tw_step": cfg.twist_deg,
             "state": self.state if t >= self.active_from else "warmup",
         }
+        if lg:
+            dbg["lg"] = {k: round(v, 3) for k, v in lg.items()}
         return events, dbg
 
     def _twist(self, t, dt, tw_rate, yaw, pitch, events):
@@ -551,20 +626,446 @@ class GestureDetector:
             self.tw_last_ok = t
             if abs(self.tw_acc) >= cfg.twist_deg:
                 step_dir = 1 if self.tw_acc > 0 else -1
-                events.append(
-                    (
-                        "twist_cw" if step_dir > 0 else "twist_ccw",
-                        abs(self.tw_acc) / cfg.twist_deg,
-                    )
-                )
-                self.tw_acc -= step_dir * cfg.twist_deg
+                name = "twist_cw" if step_dir > 0 else "twist_ccw"
+                if name not in self.overridden:  # a taught twist handles it instead
+                    events.append((name, abs(self.tw_acc) / cfg.twist_deg))
                 self.tw_dir = step_dir
                 self.tw_opp_until = t + self.TW_OPP_S
                 self.flick_block_until = t + 0.25
+                self._lock(
+                    t
+                )  # one twist = one move: wait for the pen to settle before another
             elif self.tw_dir == s:
                 self.tw_opp_until = max(self.tw_opp_until, t + self.TW_OPP_S)
         elif t - self.tw_last_ok > 0.15:
             self.tw_acc = 0.0
+
+
+# =============================================================================================
+# Learner: define gestures by demonstration.
+#
+# A rep is one motion between two calm moments. For each rep we keep the *peak vector of the first
+# lobe* (the stroke itself, not the return stroke) of either the gyro (kind "rot") or the
+# gravity-removed accel (kind "lin"), whichever is the bigger part of the motion, in the sensor's
+# own frame. Across reps we average the unit directions: `consistency` is the length of that mean
+# (1.0 = every rep pointed the exact same way). The saved signature is direction + typical peak.
+#
+# Because everything is in the sensor frame, it ignores which way you face (world yaw) and doesn't
+# need `pen_axis`; it only assumes you hold the device roughly the same way as when you taught it.
+# =============================================================================================
+BUILTIN_IDS = frozenset(GESTURE_META)
+
+
+def _slug(text):
+    s = "".join(c.lower() if c.isalnum() else "_" for c in text).strip("_")
+    return "_".join(p for p in s.split("_") if p) or "gesture"
+
+
+def _first_lobe_peak(n):
+    """Index of the peak of the first contiguous stretch of `n` that is >= 60% of its max."""
+    ok = n >= 0.6 * n.max()
+    i0 = int(np.argmax(ok))
+    j = i0
+    while j + 1 < len(n) and ok[j + 1]:
+        j += 1
+    return i0 + int(np.argmax(n[i0 : j + 1]))
+
+
+class Learner:
+    TARGET = 5  # reps the UI asks for
+    MIN_REPS = 3  # fewest reps that can be saved
+    ONSET_DPS, ONSET_G = (
+        90.0,
+        0.30,
+    )  # a rep starts when the pen moves at least this much
+    QUIET_DPS, QUIET_G = (
+        70.0,
+        0.35,
+    )  # ... and ends once it has been below this for QUIET_S
+    QUIET_S, SETTLE_S, MAX_REP_S = 0.12, 0.15, 1.5
+    REF_DPS, REF_G = 250.0, 0.6  # scale used only to decide rot vs lin
+    MIN_ROT_DPS, MIN_LIN_G = 60.0, 0.20  # weaker reps are rejected as "too gentle"
+    FRAC = 0.55  # detection threshold = FRAC * typical peak (before sensitivity)
+    FLOOR_ROT, FLOOR_LIN = 50.0, 0.15  # ...but never lower than this
+    MIN_CONSISTENCY = 0.75
+
+    def __init__(self, bc, det, config, path):
+        self.bc, self.det, self.config, self.path = bc, det, config, path
+        self.lock = threading.RLock()
+        self.sigs = {}  # id -> persisted signature (JSON-able)
+        self.teach = None
+        config.learner = self
+        self._load()
+        self._publish()
+
+    # -- persistence --------------------------------------------------------------------------
+    def _load(self):
+        try:
+            with open(self.path) as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            print(
+                f"[learn] couldn't read {self.path} ({e}); starting with no taught gestures."
+            )
+            return
+        actions = {}
+        for gid, s in (data.get("gestures") or {}).items():
+            try:
+                d = [float(x) for x in s["dir"]]
+                if (
+                    s["kind"] not in ("rot", "lin")
+                    or len(d) != 3
+                    or float(s["ref"]) <= 0
+                ):
+                    raise ValueError("bad signature")
+                if not all(math.isfinite(x) for x in d) or not any(d):
+                    raise ValueError("bad direction")
+                self.sigs[gid] = {
+                    "label": str(s.get("label") or gid)[:24],
+                    "custom": gid not in BUILTIN_IDS,
+                    "kind": s["kind"],
+                    "dir": d,
+                    "ref": float(s["ref"]),
+                    "sens": min(max(float(s.get("sens", 1.0)), 0.4), 2.5),
+                    "reps": int(s.get("reps", 0)),
+                    "consistency": float(s.get("consistency", 0.0)),
+                }
+                if s.get("action") in ACTION_META:
+                    actions[gid] = s["action"]
+            except (KeyError, TypeError, ValueError) as e:
+                print(f"[learn] skipping bad entry '{gid}' in {self.path}: {e}")
+        with self.config.lock:
+            for gid, a in actions.items():
+                if gid not in BUILTIN_IDS:
+                    self.config.mapping[gid] = a
+        if self.sigs:
+            print(f"[learn] loaded {len(self.sigs)} taught gesture(s) from {self.path}")
+
+    def save(self):
+        mapping = (
+            self.config.mapping_copy()
+        )  # config lock first, never while holding ours
+        with self.lock:
+            out = {}
+            for gid, s in self.sigs.items():
+                e = dict(s)
+                if not s["custom"]:
+                    e.pop("custom", None)
+                else:
+                    e["action"] = mapping.get(gid, "none")
+                out[gid] = e
+            try:
+                os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+                tmp = self.path + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump({"version": 1, "gestures": out}, f, indent=2)
+                os.replace(tmp, self.path)
+            except OSError as e:
+                print(f"[learn] couldn't save {self.path}: {e}")
+
+    def _publish(self):
+        """Push the signatures into the live detector."""
+        with self.lock:
+            rt = {}
+            for gid, s in self.sigs.items():
+                d = np.asarray(s["dir"], float)
+                d = d / np.linalg.norm(d)
+                floor = self.FLOOR_ROT if s["kind"] == "rot" else self.FLOOR_LIN
+                rt[gid] = {
+                    "kind": s["kind"],
+                    "dir": d,
+                    "thr": max(floor, self.FRAC * s["ref"]) / s["sens"],
+                }
+            self.det.learned = rt
+            self.det.overridden = frozenset(g for g in rt if g in BUILTIN_IDS)
+
+    # -- views --------------------------------------------------------------------------------
+    def custom_labels(self):
+        with self.lock:
+            return {g: s["label"] for g, s in self.sigs.items() if s["custom"]}
+
+    def summary(self):
+        with self.lock:
+            return {
+                g: {
+                    "label": s["label"],
+                    "custom": s["custom"],
+                    "kind": s["kind"],
+                    "reps": s["reps"],
+                    "consistency": round(s["consistency"], 2),
+                    "sens": s["sens"],
+                }
+                for g, s in self.sigs.items()
+            }
+
+    def teach_msg(self, note="", error=""):
+        with self.lock:
+            tc = self.teach
+            if tc is None:
+                return None
+            fit = self._fit(tc["reps"]) if tc["reps"] else None
+            return {
+                "type": "teach",
+                "state": "recording" if tc["buf"] is not None else "waiting",
+                "id": tc["id"],
+                "label": tc["label"],
+                "custom": tc["custom"],
+                "reps": len(tc["reps"]),
+                "target": self.TARGET,
+                "min_reps": self.MIN_REPS,
+                "consistency": round(fit[3], 2) if isinstance(fit, tuple) else None,
+                "note": note,
+                "error": error,
+            }
+
+    def _say(self, note="", error=""):
+        m = self.teach_msg(note, error)
+        self.bc.send(m if m else {"type": "teach", "state": "idle"})
+
+    def _publish_all(self):
+        self.bc.send(self.config.snapshot())
+
+    # -- maths --------------------------------------------------------------------------------
+    @staticmethod
+    def _fit(reps):
+        """reps = [(kind, vec)] -> (kind, unit dir, ref peak, consistency, n_used) or an error str."""
+        kinds = [k for k, _ in reps]
+        kind = max(set(kinds), key=kinds.count)
+        use = [np.asarray(v, float) for k, v in reps if k == kind]
+        U = [v / np.linalg.norm(v) for v in use]
+        m = np.mean(U, 0)
+        c = float(np.linalg.norm(m))
+        if c < 1e-6:
+            return "the reps cancel each other out (opposite directions?)"
+        d = m / c
+        peak = [max(0.0, v @ d) * max(0.0, (v @ d) / np.linalg.norm(v)) for v in use]
+        return kind, d, float(np.median(peak)), c, len(use)
+
+    def _analyse(self, buf):
+        """One recorded rep -> (kind, peak vector) or an error string."""
+        ts = np.array([b[0] for b in buf])
+        keep = ts - ts[0] <= 0.35
+        pick = {}
+        for kind, idx in (("rot", 1), ("lin", 2)):
+            V = np.array([b[idx] for b in buf])[keep]
+            n = np.linalg.norm(V, axis=1)
+            i = _first_lobe_peak(n)
+            pick[kind] = (V[i], float(n[i]))
+        kind = (
+            "rot"
+            if pick["rot"][1] / self.REF_DPS >= pick["lin"][1] / self.REF_G
+            else "lin"
+        )
+        vec, mag = pick[kind]
+        if mag < (self.MIN_ROT_DPS if kind == "rot" else self.MIN_LIN_G):
+            return "too gentle, move a bit more firmly"
+        return kind, vec
+
+    # -- per packet (main thread, gesture mode only) ------------------------------------------
+    def teaching(self):
+        return self.teach is not None
+
+    def feed(self, t, w, lin):
+        """Returns True while a teach session is open (the caller then ignores normal gestures)."""
+        with self.lock:
+            tc = self.teach
+            if tc is None:
+                return False
+            wn, ln = float(np.linalg.norm(w)), float(np.linalg.norm(lin))
+            calm = wn < self.QUIET_DPS and ln < self.QUIET_G
+            if tc["buf"] is None:
+                # "settled" = the pen was calm for SETTLE_S *before* this packet (so this packet's own
+                # movement can't cancel it)
+                settled = (
+                    tc["calm_since"] is not None
+                    and t - tc["calm_since"] >= self.SETTLE_S
+                )
+                if calm:
+                    if tc["calm_since"] is None:
+                        tc["calm_since"] = t
+                else:
+                    tc["calm_since"] = None
+                if settled and (wn > self.ONSET_DPS or ln > self.ONSET_G):
+                    tc["buf"] = [(t, np.array(w, float), np.array(lin, float))]
+                    tc["end_calm"] = None
+                    self._say("recording...")
+                return True
+            tc["buf"].append((t, np.array(w, float), np.array(lin, float)))
+            if calm:
+                if tc["end_calm"] is None:
+                    tc["end_calm"] = t
+            else:
+                tc["end_calm"] = None
+            ended = tc["end_calm"] is not None and t - tc["end_calm"] >= self.QUIET_S
+            if ended or t - tc["buf"][0][0] > self.MAX_REP_S:
+                buf, tc["buf"], tc["calm_since"] = tc["buf"], None, None
+                res = self._analyse(buf)
+                if isinstance(res, str):
+                    print(f"  [teach] rep rejected: {res}")
+                    self._say(error=f"Rep not counted: {res}.")
+                else:
+                    tc["reps"].append(res)
+                    print(f"  [teach] rep {len(tc['reps'])}/{self.TARGET} ({res[0]})")
+                    self._say(note="Rep recorded. Pause, then do it again.")
+            return True
+
+    def interrupt(self):
+        """Gesture mode ended (finger lifted): drop a half-recorded rep."""
+        with self.lock:
+            if self.teach is not None and self.teach["buf"] is not None:
+                self.teach["buf"] = None
+                self.teach["calm_since"] = None
+                self._say(note="Interrupted: that rep was dropped.")
+
+    # -- websocket messages (broadcaster thread) ----------------------------------------------
+    def on_message(self, msg):
+        kind = msg.get("type")
+        with self.lock:
+            if kind == "teach_start":
+                self._start(msg)
+            elif kind == "teach_cancel":
+                self.teach = None
+                self._say()
+            elif kind == "teach_undo" and self.teach and self.teach["reps"]:
+                self.teach["reps"].pop()
+                self._say(note="Last rep removed.")
+            elif kind == "teach_finish" and self.teach:
+                self._finish()
+            elif kind == "gesture_delete":
+                self._delete(msg.get("id"))
+            elif kind == "gesture_set":
+                self._set(msg)
+
+    def _start(self, msg):
+        gid = msg.get("id")
+        if gid in BUILTIN_IDS:
+            label, custom = GESTURE_META[gid], False
+        elif gid in self.sigs and self.sigs[gid]["custom"]:
+            label, custom = self.sigs[gid]["label"], True
+        else:
+            label = " ".join(str(msg.get("label") or "").split())[:24]
+            if not label:
+                self.bc.send(
+                    {
+                        "type": "teach",
+                        "state": "idle",
+                        "error": "Give the new gesture a name first.",
+                    }
+                )
+                return
+            base = "custom_" + _slug(label)
+            gid, i = base, 2
+            while gid in self.sigs or gid in BUILTIN_IDS:
+                gid, i = f"{base}_{i}", i + 1
+            custom = True
+        self.teach = {
+            "id": gid,
+            "label": label,
+            "custom": custom,
+            "reps": [],
+            "buf": None,
+            "calm_since": None,
+            "end_calm": None,
+        }
+        print(
+            f"  [teach] teaching '{label}' ({gid}); enter gesture mode and do the motion {self.TARGET}x"
+        )
+        self._say(note="Enter gesture mode, then do the motion.")
+
+    def _finish(self):
+        tc = self.teach
+        if len(tc["reps"]) < self.MIN_REPS:
+            self._say(
+                error=f"Need at least {self.MIN_REPS} reps ({len(tc['reps'])} so far)."
+            )
+            return
+        fit = self._fit(tc["reps"])
+        if isinstance(fit, str):
+            self._say(error=f"Can't learn that: {fit}.")
+            return
+        kind, d, ref, cons, n_used = fit
+        if n_used < self.MIN_REPS:
+            self._say(
+                error="The reps were a mix of rotations and pushes. Undo the odd ones out, or redo it more consistently."
+            )
+            return
+        if cons < self.MIN_CONSISTENCY:
+            self._say(
+                error=f"Reps point in different directions (consistency {cons:.0%}, need {self.MIN_CONSISTENCY:.0%}). Undo the odd ones or redo them."
+            )
+            return
+        gid = tc["id"]
+        old = self.sigs.get(gid)
+        similar = [
+            s["label"]
+            for g, s in self.sigs.items()
+            if g != gid
+            and s["kind"] == kind
+            and float(np.dot(d, s["dir"]) / np.linalg.norm(s["dir"])) > 0.9
+        ]
+        self.sigs[gid] = {
+            "label": tc["label"],
+            "custom": tc["custom"],
+            "kind": kind,
+            "dir": [float(x) for x in d],
+            "ref": ref,
+            "sens": old["sens"] if old else 1.0,
+            "reps": n_used,
+            "consistency": cons,
+        }
+        self.teach = None
+        self._publish()
+        done = {
+            "type": "teach",
+            "state": "done",
+            "id": gid,
+            "label": tc["label"],
+            "reps": n_used,
+            "consistency": round(cons, 2),
+        }
+        if similar:
+            done["note"] = (
+                "Heads up: very similar to "
+                + ", ".join(similar)
+                + "; they may get confused."
+            )
+        print(
+            f"  [teach] saved '{tc['label']}' ({kind}, {n_used} reps, consistency {cons:.0%})"
+        )
+        threading.Thread(target=self._after_change, args=(done,), daemon=True).start()
+
+    def _after_change(self, done=None):
+        # outside our lock: save() takes the config lock first
+        self.save()
+        self._publish_all()
+        if done:
+            self.bc.send(done)
+
+    def _delete(self, gid):
+        if gid not in self.sigs:
+            return
+        s = self.sigs.pop(gid)
+        self._publish()
+        if s["custom"]:
+            with self.config.lock:
+                self.config.mapping.pop(gid, None)
+        print(
+            f"  [teach] {'deleted' if s['custom'] else 'reset to factory'}: {s['label']}"
+        )
+        threading.Thread(target=self._after_change, daemon=True).start()
+
+    def _set(self, msg):
+        gid = msg.get("id")
+        try:
+            sens = min(max(float(msg.get("sensitivity")), 0.4), 2.5)
+        except (TypeError, ValueError):
+            return
+        if gid in self.sigs:
+            self.sigs[gid]["sens"] = sens
+            self._publish()
+            threading.Thread(target=self._after_change, daemon=True).start()
 
 
 # =============================================================================================
@@ -584,9 +1085,12 @@ def _num(v):
 
 
 class Session:
-    def __init__(self, bc, meta, stream, typist, det, args, config, trace_scale=1.0):
+    def __init__(
+        self, bc, meta, stream, typist, det, args, config, trace_scale=1.0, learner=None
+    ):
         self.bc, self.meta, self.stream, self.typist = bc, meta, stream, typist
         self.det, self.args, self.config, self.scale = det, args, config, trace_scale
+        self.learner = learner
         self.active = False
         self.begin(None)
 
@@ -671,8 +1175,13 @@ class Session:
                 if p[
                     1
                 ]:  # ignore anything that "happens" after the finger has left the pad
-                    for name, score in events:
-                        self.handle(name, score)
+                    if self.learner and self.learner.feed(
+                        p[0], self.det.w_dps, self.det.lin_g
+                    ):
+                        pass  # teaching: motions are being recorded, not acted on
+                    else:
+                        for name, score in events:
+                            self.handle(name, score)
             else:
                 self._send(self._imu(p))
             return
@@ -680,6 +1189,8 @@ class Session:
 
     def on_end(self):
         if self.active:
+            if self.learner:
+                self.learner.interrupt()
             self.bc.send({"type": "mode", "mode": "write"})
             print("  [gesture mode off]")
         else:
@@ -722,7 +1233,7 @@ class Session:
             note = "" if t.move(1) else "  (at end)"
             bc.send(t.snapshot())
         # action == "none": nothing to do to the text.
-        gesture_label, action_label = GESTURE_META[name], ACTION_META[action]
+        gesture_label, action_label = self.config.label(name), ACTION_META[action]
         bc.send(
             {
                 "type": "gesture",
@@ -797,7 +1308,12 @@ def live(args):
         args
     )  # starting thresholds come from the CLI flags below; remappable live.
     det = GestureDetector(meta, args)
-    sess = Session(broadcaster, meta, stream, typist, det, args, config)
+    learner = Learner(
+        broadcaster, det, config, os.path.join(args.data, "gestures.json")
+    )
+    sess = Session(
+        broadcaster, meta, stream, typist, det, args, config, learner=learner
+    )
 
     def on_ws_message(msg):
         if msg.get("type") == "config_set":
@@ -805,6 +1321,8 @@ def live(args):
             broadcaster.send(
                 config.snapshot()
             )  # echo the resulting config to every client
+        else:
+            learner.on_message(msg)  # teach_* / gesture_* (ignores anything else)
 
     broadcaster.on_message = on_ws_message
     broadcaster.snapshot = lambda: [
