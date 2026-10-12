@@ -49,6 +49,18 @@ and from then on matches live motion against that learned direction. Taught gest
 <data>/gestures.json and reloaded at startup. Factory kinematics stay as the default for any
 gesture you haven't taught; "Back to factory" removes a taught override.
 
+Autocomplete + read-aloud: a local Ollama model (default qwen2.5:3b) predicts the rest of the
+current word and the words after it; the new "Autocomplete" action (assign it to any gesture in
+settings) inserts the first predicted word, and again for the next one. Every finished word (a
+space/newline typed or autocompleted after it) is sent to the page as a `speak` message so the
+browser reads it aloud. Gestures themselves are never spoken.
+
+Voice: by default the SERVER speaks each finished word itself through the host's `spd-say` (or
+`espeak-ng`), because browsers on some Linux setups can't reach speech-dispatcher. At startup it says
+"voice ready" and prints every word it speaks, so you can see whether it works. The page's
+settings > Voice can mute it or switch to the browser's own voice instead; exactly one of them
+speaks. --no-speak turns the server voice off.
+
 Twists are single moves now (one twist = one event), not a stepping dial.
 
 Live config: the gesture->action mapping and every threshold live in a Config object on the server,
@@ -89,8 +101,15 @@ import argparse
 import json
 import math
 import os
+import queue
+import re
+import shutil
+import subprocess
 import sys
 import threading
+import time
+import urllib.error
+import urllib.request
 
 import numpy as np
 
@@ -231,35 +250,420 @@ class NoBroadcaster:
 # Text buffer (server-owned so console-only mode works and the frontend is just a view)
 # =============================================================================================
 class Typist:
+    PUNCT = '.,;:!?"()[]{}\u2026\u2013\u2014\u201c\u201d'
+
     def __init__(self):
         self.chars = []
         self.cur = 0
         self.caps = False
+        self.lock = threading.RLock()  # the LLM thread may insert text too
+        self.on_change = (
+            None  # callable(), after any edit or cursor move (called outside the lock)
+        )
+        self.on_word = (
+            None  # callable(word), when a word is finished (whitespace typed after it)
+        )
+
+    def _fire(self, words=()):
+        for w in words:
+            if self.on_word:
+                self.on_word(w)
+        if self.on_change:
+            self.on_change()
+
+    def _word_before(self, i):
+        j = i
+        while j > 0 and not self.chars[j - 1].isspace():
+            j -= 1
+        w = "".join(self.chars[j:i]).strip(self.PUNCT)
+        return w if any(c.isalnum() for c in w) else ""
 
     def put(self, s):
-        for ch in s:
-            self.chars.insert(self.cur, ch)
-            self.cur += 1
+        words = []
+        with self.lock:
+            for ch in s:
+                self.chars.insert(self.cur, ch)
+                self.cur += 1
+                if ch.isspace():
+                    w = self._word_before(self.cur - 1)
+                    if w:
+                        words.append(w)
+        self._fire(words)
 
     def backspace(self):
-        if self.cur == 0:
-            return False
-        del self.chars[self.cur - 1]
-        self.cur -= 1
+        with self.lock:
+            if self.cur == 0:
+                return False
+            del self.chars[self.cur - 1]
+            self.cur -= 1
+        self._fire()
         return True
 
     def move(self, d):
-        new = min(max(self.cur + d, 0), len(self.chars))
-        moved = new != self.cur
-        self.cur = new
+        with self.lock:
+            new = min(max(self.cur + d, 0), len(self.chars))
+            moved = new != self.cur
+            self.cur = new
+        if moved:
+            self._fire()
         return moved
 
+    def context(self):
+        """(text before the cursor, the character right after it or "")."""
+        with self.lock:
+            nxt = self.chars[self.cur] if self.cur < len(self.chars) else ""
+            return "".join(self.chars[: self.cur]), nxt
+
     def snapshot(self):
-        return {"type": "text", "text": "".join(self.chars), "cursor": self.cur}
+        with self.lock:
+            return {"type": "text", "text": "".join(self.chars), "cursor": self.cur}
 
     def show(self):
-        s = "".join(self.chars).replace("\n", "\u23ce")
-        return f"  text: {s[: self.cur]}|{s[self.cur :]}"
+        with self.lock:
+            s = "".join(self.chars).replace("\n", "\u23ce")
+            return f"  text: {s[: self.cur]}|{s[self.cur :]}"
+
+
+class Voice:
+    """Speaks finished words through the host's speech-dispatcher (`spd-say`) or `espeak-ng`.
+    Only does anything while `enabled` (the page switches it on when it picked the server route)."""
+
+    def __init__(self, bc, enabled=True):
+        self.bc, self.enabled, self.rate = bc, enabled, 1.0
+        self.engine = (
+            "spd-say"
+            if shutil.which("spd-say")
+            else "espeak-ng"
+            if shutil.which("espeak-ng")
+            else None
+        )
+        self.q = queue.Queue(maxsize=50)
+        self._warned = False
+        if self.engine:
+            print(
+                f"[voice] server voice: {self.engine}" + ("" if enabled else " (off)")
+            )
+            threading.Thread(target=self._run, daemon=True).start()
+        else:
+            print(
+                "[voice] neither spd-say nor espeak-ng found; the server can't speak."
+            )
+
+    def say(self, word, force=False):
+        if (self.enabled or force) and self.engine and word:
+            try:
+                self.q.put_nowait(word)
+            except queue.Full:
+                pass
+
+    def _cmd(self, word):
+        word = word.lstrip("-")  # never let a word look like an option
+        if (
+            self.engine == "spd-say"
+        ):  # rate -100..100; speech-dispatcher queues messages in order itself
+            r = int(max(-100, min(100, (self.rate - 1.0) * 100)))
+            return ["spd-say", "-r", str(r), word]
+        return ["espeak-ng", "-s", str(int(175 * self.rate)), word]
+
+    def _run(self):
+        while True:
+            w = self.q.get()
+            print(f"  [voice] say: {w}")
+            try:
+                r = subprocess.run(
+                    self._cmd(w), timeout=15, capture_output=True, text=True
+                )
+                if r.returncode != 0:
+                    print(
+                        f"[voice] {self.engine} exited {r.returncode}: {(r.stderr or r.stdout).strip()}"
+                    )
+            except Exception as e:
+                print(f"[voice] {self.engine} failed: {e}")
+
+    def on_message(self, msg):
+        k = msg.get("type")
+        if k == "voice_set":
+            self.enabled = bool(msg.get("server"))
+            try:
+                self.rate = min(max(float(msg.get("rate", 1.0)), 0.5), 2.0)
+            except (TypeError, ValueError):
+                pass
+        elif k == "voice_test":
+            self.say("Hello, this is AirTalk", force=True)
+
+    def snapshot(self):
+        return {
+            "type": "voice",
+            "engine": self.engine or "none",
+            "server": self.enabled,
+        }
+
+
+# =============================================================================================
+# Autocomplete: a local LLM (Ollama) predicts what comes next; one gesture accepts it word by word.
+#
+# `cont` is the model's predicted continuation of `key` (= the text before the cursor). Accepting
+# inserts its first word (the rest of the word you're in the middle of, or else the next word) plus
+# a space, and keeps the remainder, so a second accept needs no new model call. Typing the predicted
+# letters consumes `cont` the same way; anything else throws it away and asks again. Requests are
+# made on a background thread (latest wins; stale answers are dropped), so the pen loop never waits.
+# If you accept before the answer is back, the accept is queued and applied the moment it arrives.
+# =============================================================================================
+class Autocomplete:
+    N_PREDICT = 8  # tokens per request; trimmed to MAX_WORDS clean words
+    MAX_WORDS = 2
+    CONTEXT_CHARS = 400
+    DEBOUNCE_S = 0.2
+    PENDING_S = 4.0  # an early accept waits this long for the model
+    # A few plain lines so even an instruct model continues in the same plain style (no markdown,
+    # no punctuation) instead of writing a formatted answer.
+    HEADER = (
+        "plain text typed by one person using only letters numbers and spaces\n"
+        "i am going to the store to buy some milk and bread\n"
+        "can you call me when you get home tonight\n"
+        "the meeting starts at 3 pm in room 12\n"
+        "thank you so much for your help with the project\n"
+        "we should leave at 7 so we are not late\n"
+    )
+    STOPS = ["\n", "*", "#", "`", "_", "(", ")", '"', ".", ",", "!", "?", ";", ":"]
+
+    def __init__(self, bc, typist, url, model):
+        self.bc, self.typist = bc, typist
+        self.url = url.rstrip("/")
+        self.model = model  # None = pick a qwen2.5 3b model from what Ollama has
+        self.lock = threading.Lock()
+        self.key, self.cont = "", ""
+        self.want = (
+            ""  # first job = warm the model up so your first real request isn't slow
+        )
+        self.warmed = False
+        self.pending_until = 0.0
+        self.status = "loading"
+        self.wake = threading.Event()
+        typist.on_change = self.on_text_change
+        threading.Thread(target=self._worker, daemon=True).start()
+        self.wake.set()
+
+    # -- status / messages --------------------------------------------------------------------
+    def _set_status(self, st):
+        if st != self.status:
+            self.status = st
+            self.bc.send({"type": "llm", "status": st, "model": self.model or ""})
+
+    def _send_suggest(self):
+        with self.lock:
+            msg = {"type": "suggest", "text": self.cont, "at": len(self.key or "")}
+        self.bc.send(msg)
+
+    def snapshot_msgs(self):
+        with self.lock:
+            sug = {"type": "suggest", "text": self.cont, "at": len(self.key or "")}
+        return [{"type": "llm", "status": self.status, "model": self.model or ""}, sug]
+
+    # -- typist hook --------------------------------------------------------------------------
+    @staticmethod
+    def _consume(cont, extra):
+        """`extra` was just typed/inserted after the text `cont` continues; what's left of `cont`,
+        or None if the text diverged from the prediction."""
+        if cont.startswith(extra):
+            return cont[len(extra) :]
+        e = extra.rstrip()
+        if (
+            e != extra
+            and e
+            and cont.startswith(e)
+            and (len(cont) == len(e) or cont[len(e)].isspace())
+        ):
+            return cont[len(e) :].lstrip()
+        return None
+
+    def on_text_change(self):
+        before, nxt = self.typist.context()
+        with self.lock:
+            old, cont = self.key, self.cont
+            if nxt.isalnum():  # cursor is inside an existing word: stay quiet
+                self.key, self.cont, need = before, "", False
+            else:
+                left = None
+                if old is not None and before.startswith(old):
+                    left = self._consume(cont, before[len(old) :])
+                self.key = before
+                self.cont = left if left is not None else ""
+                need = len(self.cont.split()) < 2
+            if need:
+                self.want = before
+        if need:
+            self.wake.set()
+        self._send_suggest()
+
+    # -- accept (gesture) ---------------------------------------------------------------------
+    def accept(self):
+        """Returns a short note for the console."""
+        if self.status == "offline":
+            return "  (autocomplete: Ollama not reachable)"
+        before, _ = self.typist.context()
+        with self.lock:
+            cont = self.cont if self.key == before else ""
+        if not cont.strip():
+            with self.lock:
+                self.pending_until = time.time() + self.PENDING_S
+                self.want = before
+            self.wake.set()
+            return "  (autocomplete: waiting for the model...)"
+        m = re.match(r"(\S*)\s*", cont)
+        token = m.group(1)
+        self.typist.put(
+            token + " "
+        )  # fires on_word (read aloud) and on_text_change (consumes cont)
+        self.bc.send(self.typist.snapshot())
+        return ""
+
+    # -- model --------------------------------------------------------------------------------
+    def _http(self, path, body=None, timeout=60):
+        req = urllib.request.Request(
+            self.url + path,
+            data=None if body is None else json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode())
+
+    def _pick_model(self):
+        names = [
+            m.get("name", "")
+            for m in self._http("/api/tags", timeout=5).get("models", [])
+        ]
+        if self.model and self.model in names:
+            return
+        if self.model:
+            print(
+                f"[llm] model '{self.model}' isn't in Ollama (have: {', '.join(names) or 'none'}). Run: ollama pull {self.model}"
+            )
+            return
+        pick = next((n for n in names if n.startswith("qwen2.5:3b")), None) or next(
+            (n for n in names if "qwen2.5" in n and "3b" in n), None
+        )
+        self.model = pick or "qwen2.5:3b"
+        if pick:
+            print(f"[llm] using Ollama model '{pick}'")
+        else:
+            print(
+                f"[llm] no qwen2.5 3b model found in Ollama (have: {', '.join(names) or 'none'}). Run: ollama pull qwen2.5:3b"
+            )
+
+    def _ask(self, key, n=None):
+        ends_space = key.endswith(" ")
+        text = key[-self.CONTEXT_CHARS :]
+        prompt = self.HEADER + (text.rstrip(" ") if ends_space else text)
+        out = self._http(
+            "/api/generate",
+            {
+                "model": self.model,
+                "prompt": prompt,
+                "raw": True,  # plain completion; no chat template
+                "stream": False,
+                "keep_alive": "30m",
+                "options": {
+                    "num_predict": n or self.N_PREDICT,
+                    "temperature": 0.2,
+                    "top_k": 20,
+                    "num_ctx": 1024,
+                    "stop": self.STOPS,
+                },
+            },
+            timeout=90,
+        )
+        return self._clean(
+            out.get("response", ""), key, ends_space, out.get("done_reason") == "length"
+        )
+
+    @classmethod
+    def _clean(cls, r, key, ends_space, cut):
+        """Model output -> at most MAX_WORDS words made only of letters/digits, joined by spaces."""
+        r = r.split("\n")[0]
+        if ends_space and r.startswith(" "):
+            r = r[1:]
+        if cut:  # generation stopped mid-token: the last word may be unfinished
+            i = r.rfind(" ")
+            if i > 0:
+                r = r[:i]
+        lead = " " if r.startswith(" ") else ""
+        keep = []
+        for w in r.split():
+            m = re.match(r"[A-Za-z0-9]+", w)
+            if not m:
+                break
+            keep.append(m.group())
+            if m.end() < len(w):
+                # sentence punctuation after the word: keep the word, stop. Anything else (an
+                # apostrophe, hyphen, slash...) means we can't write it, so drop this word too.
+                if w[m.end()] not in '.,;:!?)"':
+                    keep.pop()
+                break
+        r = lead + " ".join(keep[: cls.MAX_WORDS]) if keep else ""
+        lw = re.search(
+            r"[A-Za-z0-9]+(?= *$)", key
+        )  # the user is typing in capitals: match them
+        if lw and len(lw.group()) >= 2 and lw.group().isupper():
+            r = r.upper()
+        return r
+
+    def _worker(self):
+        while True:
+            self.wake.wait()
+            self.wake.clear()
+            time.sleep(self.DEBOUNCE_S)
+            with self.lock:
+                key = self.want
+            if key is None:
+                continue
+            warm = not self.warmed
+            with self.lock:
+                if not warm and key != self.key:
+                    continue  # already stale
+            self._set_status(
+                "loading" if warm or self.status != "ready" else "thinking"
+            )
+            try:
+                if self.model is None or warm:
+                    self._pick_model()
+                cont = self._ask(key, 1 if warm else None)
+            except urllib.error.HTTPError as e:
+                detail = ""
+                try:
+                    detail = json.loads(e.read().decode()).get("error", "")
+                except Exception:
+                    pass
+                print(f"[llm] Ollama error {e.code}: {detail}")
+                self._set_status("offline")
+                continue
+            except Exception as e:
+                if self.status != "offline":
+                    print(
+                        f"[llm] can't reach Ollama at {self.url} ({e}); autocomplete is off until it answers."
+                    )
+                self._set_status("offline")
+                continue
+            self._set_status("ready")
+            if warm:
+                self.warmed = True
+                print("[llm] ready")
+                with self.lock:  # you may have written (or accepted) while it warmed up
+                    redo = bool(self.key) or time.time() < self.pending_until
+                    if redo:
+                        self.want = self.key
+                if redo:
+                    self.wake.set()
+                continue
+            with self.lock:
+                if key != self.key:
+                    continue  # you kept writing; this answer is for old text
+                self.cont = cont
+                pend = time.time() < self.pending_until
+                self.pending_until = 0.0
+            self._send_suggest()
+            if pend and cont.strip():
+                self.accept()
 
 
 # =============================================================================================
@@ -290,6 +694,7 @@ ACTION_META = {
     "caps_toggle": "Toggle case",
     "cursor_back": "Cursor \u2190 (back)",
     "cursor_fwd": "Cursor \u2192 (forward)",
+    "autocomplete": "Autocomplete (word, then next)",
 }
 DEFAULT_MAPPING = {
     "flick_up": "uppercase",
@@ -1086,11 +1491,22 @@ def _num(v):
 
 class Session:
     def __init__(
-        self, bc, meta, stream, typist, det, args, config, trace_scale=1.0, learner=None
+        self,
+        bc,
+        meta,
+        stream,
+        typist,
+        det,
+        args,
+        config,
+        trace_scale=1.0,
+        learner=None,
+        auto=None,
     ):
         self.bc, self.meta, self.stream, self.typist = bc, meta, stream, typist
         self.det, self.args, self.config, self.scale = det, args, config, trace_scale
         self.learner = learner
+        self.auto = auto
         self.active = False
         self.begin(None)
 
@@ -1232,6 +1648,10 @@ class Session:
         elif action == "cursor_fwd":
             note = "" if t.move(1) else "  (at end)"
             bc.send(t.snapshot())
+        elif action == "autocomplete":
+            note = (
+                self.auto.accept() if self.auto else "  (autocomplete is off: --no-llm)"
+            )
         # action == "none": nothing to do to the text.
         gesture_label, action_label = self.config.label(name), ACTION_META[action]
         bc.send(
@@ -1311,8 +1731,24 @@ def live(args):
     learner = Learner(
         broadcaster, det, config, os.path.join(args.data, "gestures.json")
     )
+    auto = None
+    if not args.no_llm:
+        auto = Autocomplete(broadcaster, typist, args.llm_url, args.llm_model)
+    # every finished word (typed, written or autocompleted) is read aloud by the page
+    voice = Voice(broadcaster, enabled=not args.no_speak)
+    voice.say(
+        "Voice ready", force=True
+    )  # proves the server -> spd-say path works, before any page
+
+    def on_word(w):
+        broadcaster.send(
+            {"type": "speak", "word": w}
+        )  # the page speaks it if it chose the browser route
+        voice.say(w)  # ...or we do, if it chose the server route
+
+    typist.on_word = on_word
     sess = Session(
-        broadcaster, meta, stream, typist, det, args, config, learner=learner
+        broadcaster, meta, stream, typist, det, args, config, learner=learner, auto=auto
     )
 
     def on_ws_message(msg):
@@ -1322,6 +1758,7 @@ def live(args):
                 config.snapshot()
             )  # echo the resulting config to every client
         else:
+            voice.on_message(msg)  # voice_set / voice_test
             learner.on_message(msg)  # teach_* / gesture_* (ignores anything else)
 
     broadcaster.on_message = on_ws_message
@@ -1330,6 +1767,8 @@ def live(args):
         {"type": "caps", "on": typist.caps},
         {"type": "mode", "mode": "gesture" if sess.active else "write"},
         typist.snapshot(),
+        *(auto.snapshot_msgs() if auto else []),
+        voice.snapshot(),
     ]
 
     print(
@@ -1424,6 +1863,20 @@ def main():
     )
     ap.add_argument("--port", type=int, default=5005, help="UDP port for the pen")
     ap.add_argument("--no-rebias", action="store_true")
+    ap.add_argument("--no-llm", action="store_true", help="turn off LLM autocomplete")
+    ap.add_argument(
+        "--no-speak",
+        action="store_true",
+        help="don't speak finished words from the server (spd-say/espeak-ng)",
+    )
+    ap.add_argument(
+        "--llm-url", default="http://localhost:11434", help="Ollama address"
+    )
+    ap.add_argument(
+        "--llm-model",
+        default=None,
+        help="Ollama model for autocomplete (default: the qwen2.5 3b model Ollama has)",
+    )
     ap.add_argument("--release-ms", type=float, default=80.0)
     ap.add_argument(
         "--ws-host", default="0.0.0.0", help="websocket host for the frontend"
