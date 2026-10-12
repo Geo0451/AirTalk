@@ -55,11 +55,11 @@ settings) inserts the first predicted word, and again for the next one. Every fi
 space/newline typed or autocompleted after it) is sent to the page as a `speak` message so the
 browser reads it aloud. Gestures themselves are never spoken.
 
-Server-side voice: browsers on some Linux setups (e.g. Flatpak Firefox forks) can't reach
-speech-dispatcher, so the server can speak the same finished words itself through the host's
-`spd-say` (or `espeak-ng`). The page decides which route is used (settings > Voice: Auto / Browser /
-Server) and tells the server; exactly one of them speaks. Start with --speak-server to have the
-server speak by default (useful without a page).
+Voice: by default the SERVER speaks each finished word itself through the host's `spd-say` (or
+`espeak-ng`), because browsers on some Linux setups can't reach speech-dispatcher. At startup it says
+"voice ready" and prints every word it speaks, so you can see whether it works. The page's
+settings > Voice can mute it or switch to the browser's own voice instead; exactly one of them
+speaks. --no-speak turns the server voice off.
 
 Twists are single moves now (one twist = one event), not a stepping dial.
 
@@ -328,7 +328,7 @@ class Voice:
     """Speaks finished words through the host's speech-dispatcher (`spd-say`) or `espeak-ng`.
     Only does anything while `enabled` (the page switches it on when it picked the server route)."""
 
-    def __init__(self, bc, enabled=False):
+    def __init__(self, bc, enabled=True):
         self.bc, self.enabled, self.rate = bc, enabled, 1.0
         self.engine = (
             "spd-say"
@@ -340,9 +340,14 @@ class Voice:
         self.q = queue.Queue(maxsize=50)
         self._warned = False
         if self.engine:
+            print(
+                f"[voice] server voice: {self.engine}" + ("" if enabled else " (off)")
+            )
             threading.Thread(target=self._run, daemon=True).start()
-        elif enabled:
-            print("[voice] neither spd-say nor espeak-ng found; server can't speak.")
+        else:
+            print(
+                "[voice] neither spd-say nor espeak-ng found; the server can't speak."
+            )
 
     def say(self, word, force=False):
         if (self.enabled or force) and self.engine and word:
@@ -352,27 +357,28 @@ class Voice:
                 pass
 
     def _cmd(self, word):
+        word = word.lstrip("-")  # never let a word look like an option
         if (
             self.engine == "spd-say"
         ):  # rate -100..100; speech-dispatcher queues messages in order itself
             r = int(max(-100, min(100, (self.rate - 1.0) * 100)))
-            return ["spd-say", "-r", str(r), "--", word]
-        return ["espeak-ng", "-s", str(int(175 * self.rate)), "--", word]
+            return ["spd-say", "-r", str(r), word]
+        return ["espeak-ng", "-s", str(int(175 * self.rate)), word]
 
     def _run(self):
         while True:
             w = self.q.get()
+            print(f"  [voice] say: {w}")
             try:
-                subprocess.run(
-                    self._cmd(w),
-                    timeout=15,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                r = subprocess.run(
+                    self._cmd(w), timeout=15, capture_output=True, text=True
                 )
+                if r.returncode != 0:
+                    print(
+                        f"[voice] {self.engine} exited {r.returncode}: {(r.stderr or r.stdout).strip()}"
+                    )
             except Exception as e:
-                if not self._warned:
-                    self._warned = True
-                    print(f"[voice] {self.engine} failed: {e}")
+                print(f"[voice] {self.engine} failed: {e}")
 
     def on_message(self, msg):
         k = msg.get("type")
@@ -404,11 +410,22 @@ class Voice:
 # If you accept before the answer is back, the accept is queued and applied the moment it arrives.
 # =============================================================================================
 class Autocomplete:
-    N_PREDICT = 10  # tokens per request (~5 words)
+    N_PREDICT = 8  # tokens per request; trimmed to MAX_WORDS clean words
+    MAX_WORDS = 2
     CONTEXT_CHARS = 400
     DEBOUNCE_S = 0.2
     PENDING_S = 4.0  # an early accept waits this long for the model
-    HEADER = "Notes typed in a text editor:\n\n"
+    # A few plain lines so even an instruct model continues in the same plain style (no markdown,
+    # no punctuation) instead of writing a formatted answer.
+    HEADER = (
+        "plain text typed by one person using only letters numbers and spaces\n"
+        "i am going to the store to buy some milk and bread\n"
+        "can you call me when you get home tonight\n"
+        "the meeting starts at 3 pm in room 12\n"
+        "thank you so much for your help with the project\n"
+        "we should leave at 7 so we are not late\n"
+    )
+    STOPS = ["\n", "*", "#", "`", "_", "(", ")", '"', ".", ",", "!", "?", ";", ":"]
 
     def __init__(self, bc, typist, url, model):
         self.bc, self.typist = bc, typist
@@ -551,21 +568,45 @@ class Autocomplete:
                     "temperature": 0.2,
                     "top_k": 20,
                     "num_ctx": 1024,
-                    "stop": ["\n"],
+                    "stop": self.STOPS,
                 },
             },
             timeout=90,
         )
-        r = out.get("response", "").split("\n")[0]
+        return self._clean(
+            out.get("response", ""), key, ends_space, out.get("done_reason") == "length"
+        )
+
+    @classmethod
+    def _clean(cls, r, key, ends_space, cut):
+        """Model output -> at most MAX_WORDS words made only of letters/digits, joined by spaces."""
+        r = r.split("\n")[0]
         if ends_space and r.startswith(" "):
             r = r[1:]
-        if (
-            out.get("done_reason") == "length"
-        ):  # cut off mid-token: drop the unfinished last word
+        if cut:  # generation stopped mid-token: the last word may be unfinished
             i = r.rfind(" ")
             if i > 0:
                 r = r[:i]
-        return re.sub(r" {2,}", " ", r).rstrip()
+        lead = " " if r.startswith(" ") else ""
+        keep = []
+        for w in r.split():
+            m = re.match(r"[A-Za-z0-9]+", w)
+            if not m:
+                break
+            keep.append(m.group())
+            if m.end() < len(w):
+                # sentence punctuation after the word: keep the word, stop. Anything else (an
+                # apostrophe, hyphen, slash...) means we can't write it, so drop this word too.
+                if w[m.end()] not in '.,;:!?)"':
+                    keep.pop()
+                break
+        r = lead + " ".join(keep[: cls.MAX_WORDS]) if keep else ""
+        lw = re.search(
+            r"[A-Za-z0-9]+(?= *$)", key
+        )  # the user is typing in capitals: match them
+        if lw and len(lw.group()) >= 2 and lw.group().isupper():
+            r = r.upper()
+        return r
 
     def _worker(self):
         while True:
@@ -1694,7 +1735,10 @@ def live(args):
     if not args.no_llm:
         auto = Autocomplete(broadcaster, typist, args.llm_url, args.llm_model)
     # every finished word (typed, written or autocompleted) is read aloud by the page
-    voice = Voice(broadcaster, enabled=args.speak_server)
+    voice = Voice(broadcaster, enabled=not args.no_speak)
+    voice.say(
+        "Voice ready", force=True
+    )  # proves the server -> spd-say path works, before any page
 
     def on_word(w):
         broadcaster.send(
@@ -1821,10 +1865,9 @@ def main():
     ap.add_argument("--no-rebias", action="store_true")
     ap.add_argument("--no-llm", action="store_true", help="turn off LLM autocomplete")
     ap.add_argument(
-        "--speak-server",
+        "--no-speak",
         action="store_true",
-        help="speak finished words from the server (spd-say/espeak-ng) from the start; "
-        "the page can switch this on/off live",
+        help="don't speak finished words from the server (spd-say/espeak-ng)",
     )
     ap.add_argument(
         "--llm-url", default="http://localhost:11434", help="Ollama address"

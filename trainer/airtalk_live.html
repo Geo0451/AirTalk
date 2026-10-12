@@ -363,7 +363,7 @@
       <div class="note">Only words are spoken (after a space, Enter or autocomplete), never gesture names.</div>
     </div>
     <div class="maprow"><span class="gname">Voice output</span>
-      <select id="selVoiceMode"><option value="auto">Auto (browser, else server)</option><option value="browser">Browser</option><option value="server">Server (spd-say on the AirTalk machine)</option></select></div>
+      <select id="selVoiceMode"><option value="server">Server: spd-say on the AirTalk machine (recommended)</option><option value="browser">Browser voice</option><option value="auto">Auto (browser if it has voices, else server)</option></select></div>
     <div class="checkrow"><span id="voiceInfo" style="color:var(--dim);font-size:12px"></span><button id="testVoice" class="small">Test voice</button></div>
 
     <h3>Orientation</h3>
@@ -840,11 +840,11 @@ function handle(m) {
 // ------------------------------------------------------------------ voice (browser speech)
 // Browsers only allow speech after the user has interacted with the page once, so the first click or
 // key press "unlocks" it; the speaker button turns red if a word was refused before that.
-const V = { on: true, rate: 1, pref: "auto", unlocked: false };
+const V = { on: true, rate: 1, pref: "server", unlocked: false };
 function voiceLoad() {
-  try { const v = JSON.parse(localStorage.getItem("airtalk_voice")); if (v) { V.on = v.on !== false; V.rate = v.rate || 1; V.pref = v.pref || "auto"; } } catch (e) {}
+  try { const v = JSON.parse(localStorage.getItem("airtalk_voice2")); if (v) { V.on = v.on !== false; V.rate = v.rate || 1; V.pref = v.pref || "server"; } } catch (e) {}
 }
-function voiceSave() { try { localStorage.setItem("airtalk_voice", JSON.stringify({ on: V.on, rate: V.rate, pref: V.pref })); } catch (e) {} }
+function voiceSave() { try { localStorage.setItem("airtalk_voice2", JSON.stringify({ on: V.on, rate: V.rate, pref: V.pref })); } catch (e) {} }
 function voiceSupported() { return "speechSynthesis" in window && "SpeechSynthesisUtterance" in window; }
 function voiceCount() { return voiceSupported() ? speechSynthesis.getVoices().length : 0; }
 // Which route actually speaks: the browser's own voices, or the AirTalk server (spd-say / espeak-ng).
