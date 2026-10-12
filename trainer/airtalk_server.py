@@ -1715,7 +1715,7 @@ def live(args):
                 f"-- open airtalk_live.html, point it at that address, and connect."
             )
 
-    stream = PenStream(args.port)
+    stream = PenStream(args.port, transport=args.transport, stats=args.stream_stats)
     meta = prepare_meta(stream, args.data, False, not args.no_rebias)
     if need_mag and not meta_has_mag(meta):
         sys.exit(
@@ -1862,6 +1862,19 @@ def main():
         help="weight of the magnetometer channels in variant E (1.0 = same as accel/gyro groups)",
     )
     ap.add_argument("--port", type=int, default=5005, help="UDP port for the pen")
+    ap.add_argument(
+        "--transport",
+        choices=["auto", "udp", "ble"],
+        default="auto",
+        help="how the pen connects: udp = WiFi AP (the original), ble = Bluetooth LE "
+        "(firmware USE_BLE 1, needs `pip install bleak`), auto = listen for both and use "
+        "whichever the pen speaks (default)",
+    )
+    ap.add_argument(
+        "--stream-stats",
+        action="store_true",
+        help="every 5 s print pkt/s, timestamp gaps and arrival-delay spread (to compare UDP vs BLE)",
+    )
     ap.add_argument("--no-rebias", action="store_true")
     ap.add_argument("--no-llm", action="store_true", help="turn off LLM autocomplete")
     ap.add_argument(

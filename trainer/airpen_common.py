@@ -15,12 +15,16 @@ Magnetometer (firmware: 41-byte packets, mx my mz in Gauss, raw):
     a drift-free, magnetic-north-referenced orientation; feature variants E-G use it.
 """
 
+import asyncio
+import atexit
 import glob
 import itertools
 import json
 import os
+import select
 import socket
 import struct
+import threading
 import time
 from collections import deque
 from datetime import datetime
@@ -42,6 +46,10 @@ DATA_DIR = "data"
 MAG_WEIGHT = (
     1.0  # relative weight of the mag channel group in variant E (others are 1.0)
 )
+# How long grab() waits for the first/next packet before giving up. BLE needs time to scan,
+# connect, discover services and subscribe, so it gets a much longer leash than UDP.
+NO_DATA_LIMIT_UDP_S = 5.0
+NO_DATA_LIMIT_BLE_S = 30.0
 
 
 def _looks_like_text(data):
@@ -51,6 +59,158 @@ def _looks_like_text(data):
 # =============================================================================================
 # UDP stream
 # =============================================================================================
+# ---- Bluetooth LE pen (firmware built with USE_BLE 1) ---------------------------------------
+# Same 41-byte packet as the UDP stream, one per GATT notification. Needs `pip install bleak`
+# (BlueZ on Linux). The UUIDs/name must match AirTalk3.ino.
+BLE_NAME = "AirStylus"
+BLE_SERVICE_UUID = "4f3c5a10-7b2e-4d6a-9a51-3c8e0b1a0001"
+BLE_TELEMETRY_UUID = "4f3c5a11-7b2e-4d6a-9a51-3c8e0b1a0001"
+
+
+class _BleSource:
+    """Background thread: find the pen, connect, subscribe, and queue every notification.
+
+    Reconnects forever. `should_scan()` lets the owner pause scanning (auto mode does not scan while
+    the WiFi/UDP pen is talking, so Bluetooth can't interfere with it). Data is handed over through
+    `q` plus one byte on a socketpair, so the reader can wait on UDP and BLE with a single select().
+
+    `close()` (registered with atexit) stops the thread and lets bleak disconnect cleanly. Without
+    that, a process that dies mid-connection can leave BlueZ holding the pen's single link, and the
+    ESP32 stops advertising, so the next run never finds it."""
+
+    def __init__(self, wake_w, should_scan):
+        self.q = deque(
+            maxlen=1000
+        )  # ~10 s at 100 Hz; if the reader stalls, oldest data goes first
+        self.wake_w, self.should_scan = wake_w, should_scan
+        self.connected = False
+        self.bad = 0
+        self._last_msg = ""
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="ble-pen", daemon=True)
+        self._thread.start()
+        atexit.register(self.close)
+
+    def close(self):
+        """Stop the BLE thread and wait (briefly) for the clean disconnect."""
+        self._stop.set()
+        if self._thread.is_alive() and self._thread is not threading.current_thread():
+            self._thread.join(4.0)
+
+    def _say_once(self, msg):
+        if msg != self._last_msg:
+            self._last_msg = msg
+            print(f"[ble] {msg}")
+
+    def _on_data(self, _char, data):
+        data = bytes(data)
+        if len(data) not in (PKT_SIZE_V2, PKT_SIZE_V1):
+            self.bad += 1
+            if self.bad in (1, 200):
+                print(
+                    f"[ble] got a {len(data)}-byte notification (expected {PKT_SIZE_V2}): the ATT MTU "
+                    f"is probably too small (needs >= {PKT_SIZE_V2 + 3}). Dropping those."
+                )
+            return
+        self.q.append(data)
+        try:
+            self.wake_w.send(b"\x01")
+        except (
+            OSError
+        ):  # wake buffer full: the reader is behind and will find the data in q anyway
+            pass
+
+    def _run(self):
+        try:
+            asyncio.run(self._main())
+        except Exception as e:  # never take the host down because Bluetooth misbehaved
+            print(f"[ble] stopped: {e}")
+
+    async def _main(self):
+        from bleak import BleakClient, BleakScanner
+
+        def is_pen(_dev, ad):
+            uuids = [u.lower() for u in (ad.service_uuids or [])]
+            return BLE_SERVICE_UUID in uuids or ad.local_name == BLE_NAME
+
+        while not self._stop.is_set():
+            if not self.should_scan():
+                await asyncio.sleep(1.0)
+                continue
+            try:
+                dev = await BleakScanner.find_device_by_filter(is_pen, timeout=3.0)
+            except Exception as e:
+                self._say_once(
+                    f"scan failed: {e}. Is Bluetooth on? (`rfkill list`, `systemctl status bluetooth`)"
+                )
+                await asyncio.sleep(3.0)
+                continue
+            if dev is None:
+                self._say_once(
+                    f"looking for '{BLE_NAME}' (is the pen on, flashed with USE_BLE 1? "
+                    "If a previous run died, `bluetoothctl disconnect <addr>` and reset the pen)"
+                )
+                continue
+            try:
+                gone = asyncio.Event()
+                async with BleakClient(
+                    dev, disconnected_callback=lambda _c: gone.set(), timeout=10.0
+                ) as cli:
+                    await cli.start_notify(BLE_TELEMETRY_UUID, self._on_data)
+                    self.connected = True
+                    self._last_msg = ""
+                    print(
+                        f"[ble] connected to {dev.name or BLE_NAME} ({dev.address}), "
+                        f"MTU {getattr(cli, 'mtu_size', '?')}, notifications on"
+                    )
+                    while not gone.is_set() and not self._stop.is_set():
+                        try:
+                            await asyncio.wait_for(gone.wait(), 0.5)
+                        except asyncio.TimeoutError:
+                            pass
+                # leaving the `async with` disconnects the client
+            except Exception as e:
+                self._say_once(f"connection problem: {e}")
+            if self.connected:
+                print("[ble] disconnected; searching again")
+            self.connected = False
+            await asyncio.sleep(1.0)
+
+
+class _StreamStats:
+    """--stream-stats: every few seconds print the packet rate, timestamp gaps (lost/late packets)
+    and how much later than the best case packets reach the host loop. Works on UDP and BLE alike, so
+    the two can be compared. The delay is relative (the ESP's clock isn't synced to the host's), and
+    includes whatever the host's main loop was busy with, which is the same for both transports."""
+
+    WINDOW = 5.0
+
+    def __init__(self, label):
+        self.label, self.rows, self.t0 = label, [], None
+
+    def reset(self):
+        self.rows, self.t0 = [], None
+
+    def add(self, now, st):
+        if self.t0 is None:
+            self.t0 = now
+        self.rows.append((now, st))
+        if now - self.t0 >= self.WINDOW:
+            rows, self.rows, self.t0 = self.rows, [], now
+            if len(rows) < 10:
+                return
+            span = rows[-1][1] - rows[0][1]
+            rate = (len(rows) - 1) / span if span > 0 else 0.0
+            gaps = sum(1 for a, b in zip(rows, rows[1:]) if b[1] - a[1] > 0.015)
+            lag = np.array([n - t for n, t in rows])
+            lag = (lag - lag.min()) * 1000.0
+            p50, p95, p99, mx = np.percentile(lag, [50, 95, 99, 100])
+            print(
+                f"[stats {self.label() or '?':>3}] {rate:5.1f} pkt/s | gaps>15ms {gaps:3d} | "
+                f"arrival delay p50 {p50:5.1f}  p95 {p95:5.1f}  p99 {p99:5.1f}  max {mx:5.1f} ms"
+            )
+
+
 class PenStream:
     """Reads the ESP32 packets, keeps a rolling pre-touch buffer, and cuts out touch windows.
 
@@ -58,7 +218,7 @@ class PenStream:
     the sender is a legacy 29-byte firmware.
     """
 
-    def __init__(self, port=5005, pre_s=1.0):
+    def __init__(self, port=5005, pre_s=1.0, transport=None, stats=None):
         self.pre_s = pre_s
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -77,6 +237,123 @@ class PenStream:
             True  # conservative: require a release before the first touch-down
         )
         self._warned = False
+        self._init_transport(transport, stats)
+
+    # -- transport selection (BLE support) ----------------------------------------------------
+    def _init_transport(self, transport, stats):
+        """transport: "udp" (the original WiFi-AP stream, default), "ble", or "auto" (listen on UDP
+        and look for the BLE pen at the same time; whichever one is talking is used). If None, the
+        AIRPEN_TRANSPORT environment variable is used, so tools without a flag can opt in too."""
+        t = (transport or os.environ.get("AIRPEN_TRANSPORT") or "udp").lower()
+        if t not in ("udp", "ble", "auto"):
+            raise SystemExit(f"Unknown transport '{t}' (use udp, ble or auto).")
+        self.transport, self._ble, self.source, self._udp_last = t, None, None, 0.0
+        want_stats = (
+            stats
+            if stats is not None
+            else os.environ.get("AIRPEN_STREAM_STATS", "") not in ("", "0")
+        )
+        self._stats = (
+            _StreamStats(
+                lambda: self.source or ("udp" if self.transport == "udp" else None)
+            )
+            if want_stats
+            else None
+        )
+        if t == "udp":
+            return
+        try:
+            import bleak  # noqa: F401
+        except ImportError:
+            if t == "ble":
+                raise SystemExit("BLE transport needs bleak:  pip install bleak")
+            print(
+                "[stream] 'bleak' isn't installed, so only the WiFi/UDP pen is supported (pip install bleak for BLE)."
+            )
+            self.transport = "udp"
+            return
+        self._wake_r, wake_w = socket.socketpair()
+        self._wake_r.setblocking(False)
+        wake_w.setblocking(False)
+        # auto: only scan while no UDP data has arrived for 3 s, so Bluetooth scanning can never
+        # disturb a working WiFi pen. ble: always.
+        gate = (
+            (lambda: True)
+            if t == "ble"
+            else (lambda: time.time() - self._udp_last > 3.0)
+        )
+        self._ble = _BleSource(wake_w, gate)
+        print(
+            "[stream] waiting for the pen over BLE"
+            + (f" and UDP :{self.sock.getsockname()[1]}" if t == "auto" else "")
+            + f" (BLE name '{BLE_NAME}')"
+        )
+
+    def _got(self, data, src):
+        if src != self.source:
+            self.source = src
+            print(
+                f"[stream] pen is talking over {'BLE' if src == 'ble' else 'UDP (WiFi AP)'}"
+            )
+        return data
+
+    def _wait_data(self):
+        """One raw datagram/notification from BLE and/or UDP, or None after 0.25 s of silence."""
+        ble = self._ble
+        if ble.q:
+            return self._got(ble.q.popleft(), "ble")
+        rl = [self._wake_r] + ([self.sock] if self.transport == "auto" else [])
+        try:
+            ready, _, _ = select.select(rl, [], [], 0.25)
+        except (OSError, ValueError):
+            return None
+        if self.sock in ready:
+            try:
+                data, _ = self.sock.recvfrom(2048)
+            except (socket.timeout, BlockingIOError):
+                data = None
+            if data:
+                self._udp_last = time.time()
+                return self._got(data, "udp")
+        if self._wake_r in ready:
+            try:
+                self._wake_r.recv(4096)
+            except BlockingIOError:
+                pass
+            if ble.q:
+                return self._got(ble.q.popleft(), "ble")
+        return None
+
+    def _drain_multi(self):
+        """drain() for ble/auto: discard queued BLE notifications and UDP datagrams (still decoded,
+        so stream time stays continuous, exactly like the UDP-only drain)."""
+        s, self._stats = self._stats, None
+        try:
+            while self._ble.q:
+                self._decode(self._ble.q.popleft())
+            try:
+                while self._wake_r.recv(4096):
+                    pass
+            except BlockingIOError:
+                pass
+            if self.transport == "auto":
+                self.sock.setblocking(False)
+                try:
+                    while True:
+                        try:
+                            data, _ = self.sock.recvfrom(2048)
+                        except (BlockingIOError, InterruptedError):
+                            break
+                        self._decode(data)
+                finally:
+                    self.sock.settimeout(0.25)
+        finally:
+            self._stats = s
+            if s:
+                s.reset()
+        self.ring.clear()
+        self._pending.clear()
+        self._prev_touch = True
 
     # -- low level --------------------------------------------------------------------------
     def _decode(self, data):
@@ -123,11 +400,19 @@ class PenStream:
                 ) / 1e6  # huge jump = ESP reboot
             self._last_ts = ts
             out.append((self._t, bool(touched), *vals))
+        if self._stats and out:
+            self._stats.add(time.perf_counter(), out[-1][0])
         return out
 
     def _read(self):
         if self._pending:
             return self._pending.popleft()
+        if self._ble is not None:  # ble / auto transport
+            data = self._wait_data()
+            if data is None:
+                return None
+            self._pending.extend(self._decode(data))
+            return self._pending.popleft() if self._pending else None
         try:
             data, _ = self.sock.recvfrom(2048)
         except socket.timeout:
@@ -137,6 +422,12 @@ class PenStream:
 
     def drain(self):
         """Throw away whatever is queued in the OS socket buffer (stale data)."""
+        if self._ble is not None:
+            return self._drain_multi()
+        _st, self._stats = (
+            self._stats,
+            None,
+        )  # drained packets shouldn't count in --stream-stats
         self.sock.setblocking(False)
         try:
             while True:
@@ -147,9 +438,24 @@ class PenStream:
                 self._decode(data)
         finally:
             self.sock.settimeout(0.25)
+        self._stats = _st
+        if _st:
+            _st.reset()
         self.ring.clear()
         self._pending.clear()
         self._prev_touch = True
+
+    def _no_data_limit(self):
+        return NO_DATA_LIMIT_BLE_S if self._ble is not None else NO_DATA_LIMIT_UDP_S
+
+    def _no_data_hint(self):
+        if self._ble is not None:
+            return (
+                "Is the pen on? BLE: check `bluetoothctl devices`; a stale connection left by a "
+                "previous run blocks advertising (`bluetoothctl disconnect <addr>`, then reset the "
+                "pen). Don't connect it from the GNOME Bluetooth panel."
+            )
+        return "Is the ESP32 on and on the same network?"
 
     # -- fixed-duration capture (calibration) ------------------------------------------------
     def grab(self, seconds):
@@ -158,9 +464,10 @@ class PenStream:
         while True:
             p = self._read()
             if p is None:
-                if time.time() - last > 5:
+                limit = self._no_data_limit()
+                if time.time() - last > limit:
                     raise SystemExit(
-                        "No packets for 5 s. Is the ESP32 on and on the same network?"
+                        f"No packets for {limit:.0f} s. {self._no_data_hint()}"
                     )
                 continue
             last = time.time()
@@ -207,9 +514,7 @@ class PenStream:
             p = self._read()
             if p is None:
                 if time.time() - last_pkt > 5:
-                    print(
-                        "[stream] no packets for 5 s. Is the ESP32 on and on the same network?"
-                    )
+                    print(f"[stream] no packets for 5 s. {self._no_data_hint()}")
                     last_pkt = time.time()
                 continue
             last_pkt = time.time()
