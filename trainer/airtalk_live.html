@@ -370,6 +370,7 @@
     <div class="checkrow"><span>Flip up / down</span><input type="checkbox" id="chkFlipUD"></div>
     <div class="checkrow"><span>Flip left / right</span><input type="checkbox" id="chkFlipLR"></div>
     <div class="checkrow"><span>Reverse twist direction (cursor moves the wrong way)</span><input type="checkbox" id="chkTwistSign"></div>
+    <div class="checkrow"><span>Use magnetometer to confirm slow left / right sweeps</span><input type="checkbox" id="chkMag"></div>
 
     <div class="modalfoot">
       <button id="resetBtn">Reset to defaults</button>
@@ -402,6 +403,7 @@ const G_ORDER = ["flick_up", "flick_down", "flick_left", "flick_right",
 const DEFAULT_THRESHOLDS = {
   flick_dps: 250, thrust_g: 0.6, twist_deg: 40, twist_min_dps: 70,
   gesture_gap: 0.4, gesture_confirm: 0.15, twist_sign: 1, flip_ud: false, flip_lr: false,
+  mag_assist: true, mag_sweep_deg: 35,
 };
 const DEFAULT_MAPPING = {
   flick_up: "uppercase", flick_down: "lowercase", flick_left: "backspace", flick_right: "space",
@@ -416,6 +418,8 @@ const THRESH_UI = [
     note: "How far you must twist for it to count. One twist is one move." },
   { id: "twist_min_dps", label: "Twist min speed", unit: "dps", min: 20, max: 300, step: 5,
     note: "Twists slower than this are ignored (keeps the slow untwist from counting)." },
+  { id: "mag_sweep_deg", label: "Slow sweep size (mag)", unit: "\u00b0", min: 15, max: 120, step: 5,
+    note: "Heading change within 1 s that counts as a slow left/right sweep (needs the mag checkbox below)." },
   { id: "gesture_gap", label: "Gesture entry gap", unit: "s", min: 0.1, max: 2.0, step: 0.05,
     note: "Max time between the tap and the hold that enters gesture mode." },
   { id: "gesture_confirm", label: "Gesture hold confirm", unit: "s", min: 0.05, max: 1.0, step: 0.01,
@@ -626,6 +630,7 @@ function openSettings() {
   $("chkFlipUD").checked = !!pending.thresholds.flip_ud;
   $("chkFlipLR").checked = !!pending.thresholds.flip_lr;
   $("chkTwistSign").checked = pending.thresholds.twist_sign < 0;
+  $("chkMag").checked = pending.thresholds.mag_assist !== false;
   $("overlay").classList.add("open");
   $("settingsBtn").classList.remove("dirty");
 }
@@ -774,11 +779,12 @@ $("doneBtn").onclick = closeSettings;
 $("overlay").addEventListener("click", (e) => { if (e.target === $("overlay")) closeSettings(); });
 $("chkFlipUD").addEventListener("change", (e) => { pending.thresholds.flip_ud = e.target.checked; scheduleSend(); });
 $("chkFlipLR").addEventListener("change", (e) => { pending.thresholds.flip_lr = e.target.checked; scheduleSend(); });
+$("chkMag").addEventListener("change", (e) => { pending.thresholds.mag_assist = e.target.checked; scheduleSend(); });
 $("chkTwistSign").addEventListener("change", (e) => { pending.thresholds.twist_sign = e.target.checked ? -1 : 1; scheduleSend(); });
 $("resetBtn").onclick = () => {
   pending = { thresholds: { ...DEFAULT_THRESHOLDS }, mapping: { ...S.config.mapping, ...DEFAULT_MAPPING } };
   buildMapRows(); buildThreshRows();
-  $("chkFlipUD").checked = false; $("chkFlipLR").checked = false; $("chkTwistSign").checked = false;
+  $("chkFlipUD").checked = false; $("chkFlipLR").checked = false; $("chkTwistSign").checked = false; $("chkMag").checked = true;
   sendPending();
 };
 

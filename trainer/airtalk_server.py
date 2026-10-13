@@ -720,6 +720,8 @@ THRESHOLD_FIELDS = {
     "twist_sign": (None, None, lambda v: 1 if float(v) >= 0 else -1),
     "flip_ud": (None, None, bool),
     "flip_lr": (None, None, bool),
+    "mag_assist": (None, None, bool),
+    "mag_sweep_deg": (15.0, 120.0, float),
 }
 
 
@@ -828,6 +830,11 @@ class GestureDetector:
     TW_DOM = 1.6
     TW_OPP_S = 0.5
     ARM_LOCK_S = 0.10
+    MAG_SWEEP_S = 1.0  # a mag-assisted sweep must be completed within this long
+    MAG_MIN_SPAN_S = 0.25  # ... and be watched for at least this long
+    MAG_REFRACT_S = (
+        1.2  # after any gesture, ignore sweeps this long (so the slow return isn't one)
+    )
 
     def __init__(self, meta, args):
         self.cfg = args  # read live every packet, including by this field's own name: a `config_set`
@@ -836,6 +843,13 @@ class GestureDetector:
         self.axis = self.axis / np.linalg.norm(self.axis)
         self.bias = np.asarray(meta["gyro_bias_dps"], float)
         self.acc_scale = float(meta["acc_scale"])
+        # Calibrated magnetometer (hard-iron offset, soft-iron scale, axis alignment from calib.json).
+        # Without it, mag assist is simply unavailable and everything runs on accel + gyro as before.
+        self.mag_cal = None
+        self.mag_field = 0.0
+        if meta_has_mag(meta):
+            self.mag_cal = (meta["mag_offset"], meta["mag_scale"], meta["mag_align"])
+            self.mag_field = float(meta.get("mag_field") or 0.0)
         # Taught gestures (swapped in whole by Learner._publish, so a reader never sees a half-built
         # dict): {id: {"kind": "rot"|"lin", "dir": unit 3-vector, "thr": float}}; ids that override
         # a factory motion are in `overridden` and that motion's built-in detection is switched off.
@@ -844,7 +858,11 @@ class GestureDetector:
         self.w_dps = np.zeros(
             3
         )  # latest bias-corrected gyro (deg/s, sensor frame), for the Learner
-        self.lin_g = np.zeros(3)  # latest gravity-removed accel (g, sensor frame)
+        self.lin_g = np.zeros(
+            3
+        )  # latest gravity-removed accel (g, heading frame, see feed())
+        self.gyro_sign = 1.0  # +1 if the gyro follows the right-hand rule vs. the accel axes; learned live
+        self._sign_ev = 0.0
         self.reset([])
 
     # -- lifecycle ----------------------------------------------------------------------------
@@ -858,6 +876,12 @@ class GestureDetector:
         ]
         use = calm or acc
         self.g = np.mean(use, 0) if use else None
+        self._prev_ah = None
+        self._mh = []  # mag sweep history: (t, unwrapped heading rad, cumulative gyro yaw rad)
+        self._psi_raw = None
+        self._psi_unw = 0.0
+        self._yaw_cum = 0.0
+        self._mag_block_until = 0.0
         self.f = None
         self.prev_t = None
         self.active_from = math.inf
@@ -880,8 +904,11 @@ class GestureDetector:
         self.lock_until = t + self.ARM_LOCK_S
         self.quiet_since = None
         self.tw_acc = 0.0
+        self._mh = []
 
     def _lock(self, t):
+        self._mh = []
+        self._mag_block_until = t + self.MAG_REFRACT_S
         self.state = "lockout"
         self.lock_start = t
         self.lock_until = t + self.MIN_LOCK_S
@@ -901,15 +928,35 @@ class GestureDetector:
         wn = float(np.linalg.norm(w))
         if self.g is None:
             self.g = a.copy()
-        if wn < 150.0 and abs(np.linalg.norm(a) - 1.0) < 0.15:
-            self.g += (1.0 - math.exp(-dt / 0.4)) * (a - self.g)
+        an = float(np.linalg.norm(a))
+        w_rad = np.radians(w)
+        # Gravity must follow the pen as it ROTATES, otherwise a flick's own rotation leaks gravity
+        # into the "linear" accel and what you measure depends on how the pen happens to be oriented.
+        # So: (1) work out whether the gyro axes are right-handed relative to the accel (sign learned
+        # from the data: a fixed world vector changes by -w x v in body axes), (2) turn gravity with
+        # the gyro every packet, (3) nudge it toward the accelerometer whenever that reads ~1 g.
+        ah = a / an if an > 1e-6 else None
+        if (
+            ah is not None
+            and self._prev_ah is not None
+            and abs(an - 1.0) < 0.1
+            and 40.0 < wn < 400.0
+        ):
+            pred = -np.cross(w_rad, self._prev_ah) * dt
+            self._sign_ev = 0.995 * self._sign_ev + float((ah - self._prev_ah) @ pred)
+            self.gyro_sign = 1.0 if self._sign_ev >= 0 else -1.0
+        self._prev_ah = ah
+        self.g = self.g - self.gyro_sign * np.cross(w_rad, self.g) * dt
+        if abs(an - 1.0) < 0.15:
+            tau = 0.4 if wn < 150.0 else 2.0
+            self.g += (1.0 - math.exp(-dt / tau)) * (a - self.g)
         u = self.g / max(float(np.linalg.norm(self.g)), 1e-6)
         lin = a - self.g
-        self.w_dps, self.lin_g = w, lin
 
         ax = self.axis
         f = ax - (ax @ u) * u
         nf = float(np.linalg.norm(f))
+        head_ok = nf > 0.25
         if nf > 0.25:  # pen not (nearly) vertical -> heading is defined
             self.f = f / nf
         if self.f is None:
@@ -919,6 +966,12 @@ class GestureDetector:
         f /= max(float(np.linalg.norm(f)), 1e-6)
         l = np.cross(u, f)
         yaw, pitch, roll = float(w @ np.cross(ax, l)), float(w @ l), float(w @ ax)
+        # Heading frame (forward = where the pen points, horizontally; left; world up), built from
+        # gravity and the pen's own heading. Taught gestures are recorded and matched in it, so they
+        # don't care which way you face, how the pen is tilted, or how it is rolled in your hand.
+        B = np.vstack([f, l, u])
+        wp, lp = B @ w, B @ lin
+        self.w_dps, self.lin_g = wp, lp
         d = f + ax
         d /= max(float(np.linalg.norm(d)), 1e-6)
         thrust = float(lin @ d)
@@ -937,9 +990,18 @@ class GestureDetector:
         }
         for gid in self.overridden:
             sc.pop(gid, None)
+        # Magnetometer-assisted slow sweeps (+ = swept left). Only ever ADDS a left/right score, and
+        # only when the gyro-integrated sweep agrees (see _mag_sweep), so interference can't fire it.
+        sweep, mag_info = self._mag_sweep(t, dt, p, u, f, l, float(wp[2]), head_ok)
+        if cfg.flip_lr:
+            sweep = -sweep
+        if "flick_left" in sc:
+            sc["flick_left"] = max(sc["flick_left"], max(0.0, sweep))
+        if "flick_right" in sc:
+            sc["flick_right"] = max(sc["flick_right"], max(0.0, -sweep))
         lg = {}
         for gid, sig in self.learned.items():
-            v = w if sig["kind"] == "rot" else lin
+            v = wp if sig["kind"] == "rot" else lp
             n = float(np.linalg.norm(v))
             proj = float(v @ sig["dir"])
             # |v| * cos^2: both "how hard" and "how well aimed" count, so a big motion about some
@@ -1013,7 +1075,73 @@ class GestureDetector:
         }
         if lg:
             dbg["lg"] = {k: round(v, 3) for k, v in lg.items()}
+        if mag_info is not None:
+            dbg["mag"] = (
+                mag_info  # {"ok": field trusted, "deg": signed sweep seen (+ = left)}
+            )
         return events, dbg
+
+    def _mag_sweep(self, t, dt, p, u, f, l, wu, head_ok):
+        """Slow left/right sweeps (too slow for the rate threshold) measured as a change of
+        tilt-compensated magnetic heading, which is drift-free and ignores hard-iron offsets.
+        Returns (signed score where 1.0 = `mag_sweep_deg` swept, + = left; debug dict or None).
+
+        Safe by construction: BOTH the magnetometer heading change and the gyro-integrated yaw over the
+        same window must show the sweep (the score uses the smaller of the two, same direction), so a
+        magnet or a laptop moving near the pen cannot create a gesture. The sample is ignored if the
+        field strength is off its calibrated value, the horizontal field is tiny, or the pen is nearly
+        vertical (heading undefined)."""
+        cfg = self.cfg
+        if not getattr(cfg, "mag_assist", False) or self.mag_cal is None:
+            self._mh = []
+            return 0.0, None
+        self._yaw_cum += (
+            math.radians(wu) * dt
+        )  # gyro yaw (+ = left), accumulated for corroboration
+        m = np.array(p[8:11], float) if len(p) >= 11 else None
+        ok = (
+            m is not None
+            and bool(np.isfinite(m).all())
+            and float(np.abs(m).max()) > 0.0
+        )
+        mh = None
+        if ok:
+            off, scl, al = self.mag_cal
+            m = apply_mag_cal(m[None, :], off, scl, al)[0]
+            mn = float(np.linalg.norm(m))
+            mh = m - (m @ u) * u  # horizontal part of the field
+            ok = (
+                mn > 1e-6
+                and (self.mag_field <= 0 or abs(mn / self.mag_field - 1.0) < 0.30)
+                and float(np.linalg.norm(mh)) > 0.15 * mn
+            )
+        if not ok or not head_ok or t < self._mag_block_until:
+            self._mh = []
+            return 0.0, {"ok": bool(ok and head_ok), "deg": 0.0}
+        # angle of magnetic north as seen from the pen's heading (toward the writer's left = +)
+        psi = math.atan2(float(mh @ l), float(mh @ f))
+        if self._psi_raw is not None and self._mh:
+            self._psi_unw += (psi - self._psi_raw + math.pi) % (2 * math.pi) - math.pi
+        else:
+            self._psi_unw = psi
+        self._psi_raw = psi
+        self._mh.append((t, self._psi_unw, self._yaw_cum))
+        while self._mh and t - self._mh[0][0] > self.MAG_SWEEP_S:
+            self._mh.pop(0)
+        t0, psi0, yaw0 = self._mh[0]
+        if t - t0 < self.MAG_MIN_SPAN_S:
+            return 0.0, {"ok": True, "deg": 0.0}
+        mag_left = -math.degrees(
+            self._psi_unw - psi0
+        )  # pen turns left => north turns right in its frame
+        gyr_left = math.degrees(self._yaw_cum - yaw0)
+        if mag_left * gyr_left <= 0:
+            return 0.0, {"ok": True, "deg": round(mag_left, 1)}
+        deg = math.copysign(min(abs(mag_left), abs(gyr_left)), mag_left)
+        return deg / max(float(cfg.mag_sweep_deg), 1.0), {
+            "ok": True,
+            "deg": round(deg, 1),
+        }
 
     def _twist(self, t, dt, tw_rate, yaw, pitch, events):
         cfg = self.cfg
@@ -1052,11 +1180,12 @@ class GestureDetector:
 # A rep is one motion between two calm moments. For each rep we keep the *peak vector of the first
 # lobe* (the stroke itself, not the return stroke) of either the gyro (kind "rot") or the
 # gravity-removed accel (kind "lin"), whichever is the bigger part of the motion, in the sensor's
-# own frame. Across reps we average the unit directions: `consistency` is the length of that mean
-# (1.0 = every rep pointed the exact same way). The saved signature is direction + typical peak.
+# HEADING frame (see GestureDetector.feed). Across reps we average the unit directions: `consistency` is
+# the length of that mean (1.0 = every rep pointed the exact same way). The saved signature is
+# direction + typical peak.
 #
-# Because everything is in the sensor frame, it ignores which way you face (world yaw) and doesn't
-# need `pen_axis`; it only assumes you hold the device roughly the same way as when you taught it.
+# The heading frame is built from gravity and where the pen points, and gravity is tracked through rotations, so
+# a taught gesture ignores which way you face, how the pen is tilted and how it is rolled in your hand.
 # =============================================================================================
 BUILTIN_IDS = frozenset(GESTURE_META)
 
@@ -1115,6 +1244,18 @@ class Learner:
                 f"[learn] couldn't read {self.path} ({e}); starting with no taught gestures."
             )
             return
+        if int(data.get("version", 1)) < 2:
+            bak = self.path + ".v1.bak"
+            try:
+                if not os.path.exists(bak):
+                    os.replace(self.path, bak)
+            except OSError:
+                pass
+            print(
+                f"[learn] {self.path} holds old sensor-frame gestures that depended on how the pen was "
+                f"held; they can't be converted. Please re-teach them (old file kept as {bak})."
+            )
+            return
         actions = {}
         for gid, s in (data.get("gestures") or {}).items():
             try:
@@ -1165,7 +1306,7 @@ class Learner:
                 os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
                 tmp = self.path + ".tmp"
                 with open(tmp, "w") as f:
-                    json.dump({"version": 1, "gestures": out}, f, indent=2)
+                    json.dump({"version": 2, "gestures": out}, f, indent=2)
                 os.replace(tmp, self.path)
             except OSError as e:
                 print(f"[learn] couldn't save {self.path}: {e}")
@@ -1728,6 +1869,15 @@ def live(args):
         args
     )  # starting thresholds come from the CLI flags below; remappable live.
     det = GestureDetector(meta, args)
+    if getattr(args, "mag_assist", False):
+        print(
+            "Mag-assisted sweeps: "
+            + (
+                "ON (needs gyro agreement)"
+                if det.mag_cal is not None
+                else "requested but no mag calibration in calib.json -> inactive (run --calibrate-mag)"
+            )
+        )
     learner = Learner(
         broadcaster, det, config, os.path.join(args.data, "gestures.json")
     )
@@ -1958,6 +2108,20 @@ def main():
         choices=[1, -1],
         default=1,
         help="-1 swaps clockwise/anticlockwise if the cursor moves the wrong way",
+    )
+    g.add_argument(
+        "--no-mag-gestures",
+        dest="mag_assist",
+        action="store_false",
+        help="don't use the magnetometer for gestures (default: slow left/right sweeps are confirmed by "
+        "the mag heading change; needs a mag calibration in calib.json, otherwise it's inactive). "
+        "Also a checkbox in the frontend settings.",
+    )
+    g.add_argument(
+        "--mag-sweep-deg",
+        type=float,
+        default=35.0,
+        help="degrees of heading change (within 1 s) for a mag-assisted left/right sweep (default 35)",
     )
     g.add_argument("--flip-ud", action="store_true", help="swap flick up / down")
     g.add_argument("--flip-lr", action="store_true", help="swap flick left / right")
