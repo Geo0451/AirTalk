@@ -22,8 +22,10 @@ import itertools
 import json
 import os
 import select
+import signal
 import socket
 import struct
+import sys
 import threading
 import time
 from collections import deque
@@ -76,7 +78,17 @@ class _BleSource:
 
     `close()` (registered with atexit) stops the thread and lets bleak disconnect cleanly. Without
     that, a process that dies mid-connection can leave BlueZ holding the pen's single link, and the
-    ESP32 stops advertising, so the next run never finds it."""
+    ESP32 stops advertising, so the next run never finds it.
+
+    Stale links: if the previous process was killed hard (SIGKILL, crash, power loss) BlueZ can
+    still hold that link with nobody attached. `_drop_stale()` finds a connected AirStylus in BlueZ
+    and disconnects it, so the pen starts advertising again by itself. It runs before the first scan,
+    and again (rate-limited) whenever the pen can't be found or a connection attempt fails.
+    Don't run two hosts on the same pen at once: the newest one takes the link."""
+
+    STALE_RETRY_S = (
+        15.0  # at most one "release stale link" attempt this often after startup
+    )
 
     def __init__(self, wake_w, should_scan):
         self.q = deque(
@@ -86,10 +98,31 @@ class _BleSource:
         self.connected = False
         self.bad = 0
         self._last_msg = ""
+        self._last_drop = 0.0
+        self._misses = 0
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="ble-pen", daemon=True)
         self._thread.start()
         atexit.register(self.close)
+        self._install_signal_handlers()
+
+    @staticmethod
+    def _install_signal_handlers():
+        """SIGTERM and SIGHUP (kill, closing the terminal window) skip atexit, so the BLE link would
+        be left dangling. Turn them into a normal exit so close() runs and BlueZ gets a clean
+        disconnect. Handlers the app installed itself are left alone. SIGKILL can't be caught; the
+        next run's startup cleanup covers that."""
+        if threading.current_thread() is not threading.main_thread():
+            return
+        for name in ("SIGTERM", "SIGHUP"):
+            sig = getattr(signal, name, None)
+            if sig is None:
+                continue
+            try:
+                if signal.getsignal(sig) == signal.SIG_DFL:
+                    signal.signal(sig, lambda signum, _frame: sys.exit(128 + signum))
+            except (ValueError, OSError):
+                pass
 
     def close(self):
         """Stop the BLE thread and wait (briefly) for the clean disconnect."""
@@ -120,6 +153,87 @@ class _BleSource:
         ):  # wake buffer full: the reader is behind and will find the data in q anyway
             pass
 
+    async def _drop_stale(self, force=False):
+        """Disconnect any AirStylus that BlueZ still reports as connected while we are not
+        connected ourselves, i.e. a link orphaned by a process that died. Linux/BlueZ only (talks to
+        it over D-Bus with dbus-fast, which bleak already depends on). Returns how many were dropped."""
+        if sys.platform != "linux" or self.connected:
+            return 0
+        if not force and time.time() - self._last_drop < self.STALE_RETRY_S:
+            return 0
+        self._last_drop = time.time()
+        try:
+            from dbus_fast import BusType, Message, MessageType
+            from dbus_fast.aio import MessageBus
+        except ImportError:
+            return 0
+        dropped, bus = 0, None
+        try:
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            reply = await asyncio.wait_for(
+                bus.call(
+                    Message(
+                        destination="org.bluez",
+                        path="/",
+                        interface="org.freedesktop.DBus.ObjectManager",
+                        member="GetManagedObjects",
+                    )
+                ),
+                3.0,
+            )
+            if reply.message_type == MessageType.ERROR:
+                return 0
+            for path, ifaces in reply.body[0].items():
+                dev = ifaces.get("org.bluez.Device1")
+                if not dev:
+                    continue
+
+                def prop(key, default=None, _dev=dev):
+                    v = _dev.get(key)
+                    return v.value if v is not None else default
+
+                if not prop("Connected", False):
+                    continue
+                uuids = [str(u).lower() for u in prop("UUIDs", [])]
+                if BLE_SERVICE_UUID not in uuids and BLE_NAME not in (
+                    prop("Name"),
+                    prop("Alias"),
+                ):
+                    continue
+                r = await asyncio.wait_for(
+                    bus.call(
+                        Message(
+                            destination="org.bluez",
+                            path=path,
+                            interface="org.bluez.Device1",
+                            member="Disconnect",
+                        )
+                    ),
+                    5.0,
+                )
+                addr = prop("Address", path)
+                if r.message_type == MessageType.ERROR:
+                    print(
+                        f"[ble] couldn't release the old connection to {addr}: {r.body}"
+                    )
+                else:
+                    dropped += 1
+                    print(
+                        f"[ble] released a stale connection to {addr} left by an earlier run; "
+                        "the pen should start advertising again"
+                    )
+        except Exception as e:  # BlueZ not running, no permission... never fatal
+            self._say_once(f"couldn't check BlueZ for stale connections: {e}")
+        finally:
+            if bus is not None:
+                try:
+                    bus.disconnect()
+                except Exception:
+                    pass
+        if dropped:
+            await asyncio.sleep(1.0)  # give the pen a moment to restart advertising
+        return dropped
+
     def _run(self):
         try:
             asyncio.run(self._main())
@@ -133,6 +247,9 @@ class _BleSource:
             uuids = [u.lower() for u in (ad.service_uuids or [])]
             return BLE_SERVICE_UUID in uuids or ad.local_name == BLE_NAME
 
+        await self._drop_stale(
+            force=True
+        )  # an earlier run may have died holding the pen's link
         while not self._stop.is_set():
             if not self.should_scan():
                 await asyncio.sleep(1.0)
@@ -148,8 +265,11 @@ class _BleSource:
             if dev is None:
                 self._say_once(
                     f"looking for '{BLE_NAME}' (is the pen on, flashed with USE_BLE 1? "
-                    "If a previous run died, `bluetoothctl disconnect <addr>` and reset the pen)"
+                    "a link left over from a previous run is released automatically)"
                 )
+                self._misses += 1
+                if self._misses >= 2:
+                    await self._drop_stale()
                 continue
             try:
                 gone = asyncio.Event()
@@ -158,6 +278,7 @@ class _BleSource:
                 ) as cli:
                     await cli.start_notify(BLE_TELEMETRY_UUID, self._on_data)
                     self.connected = True
+                    self._misses = 0
                     self._last_msg = ""
                     print(
                         f"[ble] connected to {dev.name or BLE_NAME} ({dev.address}), "
@@ -171,6 +292,9 @@ class _BleSource:
                 # leaving the `async with` disconnects the client
             except Exception as e:
                 self._say_once(f"connection problem: {e}")
+                await (
+                    self._drop_stale()
+                )  # a half-open link can make the next attempt fail too
             if self.connected:
                 print("[ble] disconnected; searching again")
             self.connected = False

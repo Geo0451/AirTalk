@@ -384,6 +384,61 @@ void netTaskBLE(void *pvParameters) {
 }
 #endif  // USE_BLE
 
+#if USE_BLE
+// -------------------------------------------------------------------
+// BLE WATCHDOG (BLE build only; set BLE_WATCHDOG to 0 to compile it out)
+//   A host that dies hard (kill -9, crash, power loss) can leave its Bluetooth link open with nobody
+//   attached. A connected pen stops advertising, so the next host run can't find it and only a reset
+//   helped. When the host process goes away BlueZ switches the notification subscription off, so
+//   "connected but not subscribed for a while" means the link is orphaned: drop it, and the existing
+//   onDisconnect callback restarts advertising.
+//   It never acts unless it can positively see "connected AND not subscribed" for the whole grace
+//   period, and a host that is merely slow to subscribe has plenty of time (the normal connect ->
+//   subscribe takes a second or two).
+// -------------------------------------------------------------------
+#define BLE_WATCHDOG            1
+#define BLE_SUBSCRIBE_GRACE_MS  10000
+
+#if BLE_WATCHDOG
+void bleWatchdogTask(void *pvParameters) {
+  BLE2902* cccd = nullptr;     // the descriptor the host writes to switch notifications on
+  bool     counting = false;
+  uint32_t since = 0;
+
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    if (!bleConnected || bleTelemetry == nullptr || bleServer == nullptr) {
+      counting = false;
+      continue;
+    }
+
+    if (cccd == nullptr) {
+      cccd = (BLE2902*)bleTelemetry->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
+      if (cccd == nullptr) continue;          // can't tell -> never kick anyone
+    }
+
+    if (cccd->getNotifications()) {           // someone is listening: all good
+      counting = false;
+      continue;
+    }
+
+    uint32_t now = millis();
+    if (!counting) {
+      counting = true;
+      since = now;
+      continue;
+    }
+    if (now - since >= BLE_SUBSCRIBE_GRACE_MS) {
+      Serial.println("[BLE] Connected but not subscribed for too long (orphaned link?), disconnecting");
+      bleServer->disconnect(bleServer->getConnId());
+      counting = false;
+    }
+  }
+}
+#endif  // BLE_WATCHDOG
+#endif  // USE_BLE
+
 void setup() {
   pinMode(LED_PIN, OUTPUT);
   pinMode(TOUCH_PIN, INPUT_PULLDOWN);
@@ -435,6 +490,9 @@ void setup() {
   Serial.println("[Transport] BLE");
   xTaskCreatePinnedToCore(bleInitTask, "BLE_Init", 8192, NULL, 1, NULL, 0);
   while (!bleInitDone) delay(10);
+#if BLE_WATCHDOG
+  xTaskCreatePinnedToCore(bleWatchdogTask, "BLE_WD", 4096, NULL, 1, NULL, 0);
+#endif
 #endif
 
   // Pin sampling to Core 1 and network streaming to Core 0
