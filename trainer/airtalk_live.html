@@ -7,7 +7,7 @@
 <style>
   :root {
     --bg: #0d1117; --card: #161b22; --card2: #1d242d; --card3: #232c38; --line: #2b3440;
-    --text: #e6edf3; --dim: #8b98a8;
+    --text: #e6edf3; --dim: #8b98a8; --soft: #a9b4c2;
     --write: #4aa8ff; --gest: #ffb020; --ok: #3ddc84; --bad: #ff5d5d;
     --accent: var(--write);
   }
@@ -75,13 +75,16 @@
   @media (max-width: 920px) { main { grid-template-columns: 1fr; } }
   .col { display: grid; gap: 16px; align-content: start; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
+  .card.wide { grid-column: 1 / -1; }
   .card h2 {
     margin: 0 0 10px; font-size: 12px; font-weight: 700; color: var(--dim);
     text-transform: uppercase; letter-spacing: 1.2px; display: flex; justify-content: space-between; gap: 8px;
   }
 
+  #textCol { align-content: stretch; }
+  #textCard { display: flex; flex-direction: column; }
   #text {
-    min-height: 150px; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+    flex: 1 1 0; min-height: 150px; overflow: auto; white-space: pre-wrap; word-break: break-word;
     font: 30px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace; padding: 4px 2px;
   }
   #text .ph { color: var(--dim); font-size: 18px; }
@@ -94,9 +97,15 @@
   @keyframes blink { to { visibility: hidden; } }
   .nl { color: var(--dim); font-size: .55em; vertical-align: middle; opacity: .8; }
 
-  .sketchwrap { position: relative; transition: opacity .2s, filter .2s; }
+  /* ---- air trace + live sensor graphs: one row, trace on the left, accel / gyro / mag beside it ---- */
+  .sensgrid {
+    display: grid; gap: 14px; align-items: stretch;
+    grid-template-columns: minmax(200px, 280px) repeat(3, minmax(0, 1fr));
+  }
+  @media (max-width: 920px) { .sensgrid { grid-template-columns: 1fr; } }
+  .sketchwrap { position: relative; transition: opacity .2s, filter .2s; align-self: start; }
   body.gesture .sketchwrap { opacity: .25; filter: grayscale(1); }
-  #sketch { width: 100%; height: 220px; display: block; background: #0a0e13; border-radius: 12px; }
+  #sketch { width: 100%; height: auto; aspect-ratio: 1 / 1; display: block; background: #0a0e13; border-radius: 12px; }
   #big {
     position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
     font: 700 130px/1 ui-monospace, Menlo, Consolas, monospace; color: var(--write); opacity: 0;
@@ -106,11 +115,22 @@
     0% { opacity: .0; transform: scale(.7); } 15% { opacity: .85; transform: scale(1); }
     100% { opacity: 0; transform: scale(1.15); }
   }
+  .gph { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .gph .gt { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; }
+  .gph .gt b { font-weight: 700; }
+  .gph .gt span { color: var(--soft); font-size: 12px; }
+  .gbox { position: relative; flex: 1 1 auto; min-height: 200px; background: #0a0e13; border-radius: 12px; overflow: hidden; }
+  .gbox canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .gl { display: flex; flex-wrap: wrap; gap: 2px 12px; font: 12px ui-monospace, Menlo, Consolas, monospace; color: var(--soft); min-height: 1.4em; }
+  .gl i { font-style: normal; }
+  .gl .cx { color: #ff6b6b; } .gl .cy { color: #3ddc84; } .gl .cz { color: #4aa8ff; }
+  @media (max-width: 920px) { .gbox { min-height: 170px; } }
 
   /* ---- gesture HUD: a grid of 8 cards, one per detected motion, generic/data-driven ---- */
-  #hud { transition: opacity .2s, border-color .2s, box-shadow .2s; opacity: .55; position: relative; }
-  body.gesture #hud { opacity: 1; border-color: var(--gest); box-shadow: 0 0 0 1px var(--gest), 0 0 30px rgba(255,176,32,.18); }
-  .hint { color: var(--dim); font-size: 13px; margin: -2px 0 12px; min-height: 1.4em; }
+  /* Always fully readable. Gesture mode only adds the amber border/glow around it. */
+  #hud { transition: border-color .2s, box-shadow .2s; position: relative; }
+  body.gesture #hud { border-color: var(--gest); box-shadow: 0 0 0 1px var(--gest), 0 0 30px rgba(255,176,32,.18); }
+  .hint { color: var(--soft); font-size: 13px; margin: -2px 0 12px; min-height: 1.4em; }
   body.gesture .hint { color: var(--gest); font-weight: 600; }
   /* Gesture pad: laid out like the motions themselves. Flicks on the four sides of the thrust, a
      roll rail on each outer edge. Every tile fills in the direction of its own motion. */
@@ -123,7 +143,7 @@
   .g-up { grid-area: up; } .g-down { grid-area: down; }
   .g-left { grid-area: left; } .g-right { grid-area: right; }
   .g-mid { grid-area: mid; display: grid; grid-template-rows: 1fr 1fr; gap: 8px; }
-  .g-cap { grid-column: 1 / -1; font-size: 11px; color: var(--dim); margin-top: 6px; }
+  .g-cap { grid-column: 1 / -1; font-size: 11px; color: var(--soft); margin-top: 6px; }
   .g-extra { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; }
   .gcard {
     position: relative; overflow: hidden; isolation: isolate; text-align: center; min-width: 0;
@@ -140,10 +160,10 @@
   .f-right::before { transform-origin: 0 50%;    transform: scaleX(var(--lvl, 0)); }
   .f-core::before  { transform-origin: 50% 50%;  transform: scale(var(--lvl, 0)); }
   .f-fade::before  { opacity: calc(var(--lvl, 0) * .55); }
-  .gcard .ic { font-size: 20px; line-height: 1; color: var(--dim); }
-  .gcard .motion { font-size: 10px; letter-spacing: .4px; color: var(--dim); font-weight: 700; }
-  .gcard .action { font-size: 13px; font-weight: 700; line-height: 1.2; overflow-wrap: break-word; }
-  .gcard.unassigned .action { color: var(--dim); font-weight: 500; font-style: italic; }
+  .gcard .ic { font-size: 20px; line-height: 1; color: var(--soft); }
+  .gcard .motion { font-size: 10px; letter-spacing: .4px; color: var(--soft); font-weight: 700; }
+  .gcard .action { font-size: 13px; font-weight: 700; line-height: 1.2; overflow-wrap: break-word; color: var(--text); }
+  .gcard.unassigned .action { color: var(--soft); font-weight: 500; font-style: italic; }
   .g-roll { padding: 8px 2px; }
   .g-roll .ic { font-size: 28px; transform: rotate(calc(var(--lvl, 0) * var(--rot, 0deg))); }
   .g-roll .action { font-size: 11px; }
@@ -153,7 +173,6 @@
     content: ""; position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%;
     background: var(--write); box-shadow: 0 0 6px var(--write);
   }
-  .gcard .ic, .gcard .motion { color: #a9b4c2; }
   @media (max-width: 480px) {
     #gcards { gap: 6px; grid-template-columns: 38px minmax(0, 1fr) minmax(0, 1.5fr) minmax(0, 1fr) 38px; }
     .gcard { padding: 6px 2px; }
@@ -168,7 +187,10 @@
     0% { background: var(--gest); transform: scale(1.04); box-shadow: 0 0 28px var(--gest); }
     100% { transform: scale(1); }
   }
-  .gcard.fire .motion, .gcard.fire .action, .gcard.fire .ic { color: #1a1200; }
+  /* dark text only while the amber flash is on; the animation ends back on the normal colours, so the
+     labels can never stay dark (no JS and no leftover class involved) */
+  .gcard.fire .motion, .gcard.fire .action, .gcard.fire .ic { animation: textfire .5s ease-out; }
+  @keyframes textfire { 0%, 35% { color: #1a1200; } }
 
   #toast {
     position: absolute; left: 50%; top: 42%; transform: translate(-50%, -50%) scale(.8);
@@ -184,13 +206,13 @@
     100% { opacity: 0; transform: translate(-50%, -60%) scale(1); }
   }
 
-  .dbg { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px 14px; font: 12px ui-monospace, Menlo, Consolas, monospace; color: var(--dim); }
+  .dbg { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px 14px; font: 12px ui-monospace, Menlo, Consolas, monospace; color: var(--soft); }
   .dbg i { font-style: normal; color: var(--text); }
   #state { padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); }
   #state.armed { color: var(--ok); border-color: var(--ok); }
   #state.window, #state.lockout { color: var(--gest); border-color: var(--gest); }
 
-  #log { list-style: none; margin: 10px 0 0; padding: 0; font-size: 13px; color: var(--dim); max-height: 118px; overflow: hidden; }
+  #log { list-style: none; margin: 10px 0 0; padding: 0; font-size: 13px; color: var(--soft); max-height: 118px; overflow: hidden; }
   #log li { display: flex; justify-content: space-between; padding: 2px 0; border-top: 1px solid var(--line); }
   #log li:first-child { color: var(--text); border-top: 0; }
 
@@ -294,24 +316,10 @@
 </header>
 
 <main>
-  <div class="col">
-    <section class="card">
-      <h2><span>Text</span><span><span id="llmInfo"></span> <span id="cursorInfo"></span></span></h2>
+  <div class="col" id="textCol">
+    <section class="card" id="textCard">
+      <h2><span>Text</span><span><button class="small" id="clearBtn">Clear</button> <span id="llmInfo"></span> <span id="cursorInfo"></span></span></h2>
       <div id="text" aria-live="polite"></div>
-    </section>
-    <section class="card">
-      <h2><span>Air sketch</span><span>write a character, then release</span></h2>
-      <div class="sketchwrap">
-        <canvas id="sketch" width="900" height="460"></canvas>
-        <div id="big"></div>
-      </div>
-    </section>
-    <section class="card">
-      <h2><span>How it works</span></h2>
-      <div class="legend" id="legend">
-        <b>Write</b><span>touch, draw a character, release</span>
-        <b>Gesture mode</b><span>tap, release, touch again quickly and hold; release to leave</span>
-      </div>
     </section>
   </div>
 
@@ -331,6 +339,31 @@
       <div id="toast"></div>
     </section>
   </div>
+
+  <section class="card wide">
+    <h2><span>Air trace &amp; live sensors</span><span>write a character, then release</span></h2>
+    <div class="sensgrid">
+      <div class="sketchwrap">
+        <canvas id="sketch" width="480" height="480"></canvas>
+        <div id="big"></div>
+      </div>
+      <div class="gph">
+        <div class="gt"><b>Accelerometer</b><span>g</span></div>
+        <div class="gbox"><canvas id="gAcc"></canvas></div>
+        <div class="gl" id="lAcc"></div>
+      </div>
+      <div class="gph">
+        <div class="gt"><b>Gyroscope</b><span>&deg;/s</span></div>
+        <div class="gbox"><canvas id="gGyr"></canvas></div>
+        <div class="gl" id="lGyr"></div>
+      </div>
+      <div class="gph">
+        <div class="gt"><b>Magnetometer</b><span>gauss (calibrated)</span></div>
+        <div class="gbox"><canvas id="gMag"></canvas></div>
+        <div class="gl" id="lMag"></div>
+      </div>
+    </div>
+  </section>
 </main>
 
 <div id="overlay" aria-hidden="true">
@@ -421,7 +454,7 @@ const THRESH_UI = [
   { id: "mag_sweep_deg", label: "Slow sweep size (mag)", unit: "\u00b0", min: 15, max: 120, step: 5,
     note: "Heading change within 1 s that counts as a slow left/right sweep (needs the mag checkbox below)." },
   { id: "gesture_gap", label: "Gesture entry gap", unit: "s", min: 0.1, max: 2.0, step: 0.05,
-    note: "Max time between the tap and the hold that enters gesture mode." },
+    note: "Max gap between a tap and the hold that enters gesture mode, and between two taps for a double-tap (speaks the whole text)." },
   { id: "gesture_confirm", label: "Gesture hold confirm", unit: "s", min: 0.05, max: 1.0, step: 0.01,
     note: "How long the hold must last before gesture mode actually starts." },
 ];
@@ -601,24 +634,115 @@ function fireGesture(m) {
 }
 
 // ------------------------------------------------------------------ air sketch
+// The server sends x = how far the pen tip has moved to the writer's RIGHT and y = how far it has moved
+// DOWN (both in degrees of pen swing), worked out from the calibrated pen axis and gravity at touch-down,
+// so this view is correct for however the sensor is mounted. y grows downward, like the screen.
 const cv = $("sketch"), cx = cv.getContext("2d");
 let pts = [];
 function drawSketch() {
   cx.clearRect(0, 0, cv.width, cv.height);
   cx.fillStyle = "#0a0e13"; cx.fillRect(0, 0, cv.width, cv.height);
+  cx.fillStyle = "#5d6b7c"; cx.font = "600 20px system-ui, sans-serif";
+  cx.textAlign = "left"; cx.fillText("\u2192 right", 14, cv.height - 14);
+  cx.textAlign = "right"; cx.fillText("\u2193 down", cv.width - 14, cv.height - 14);
   if (pts.length < 2) return;
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   for (const [x, y] of pts) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
-  const pad = 50, w = Math.max(x1 - x0, 20), h = Math.max(y1 - y0, 20);
-  const k = Math.min((cv.width - 2 * pad) / w, (cv.height - 2 * pad) / h);
+  const pad = 46, w = Math.max(x1 - x0, 20), h = Math.max(y1 - y0, 20);
+  const k = Math.min((cv.width - 2 * pad) / w, (cv.height - 2 * pad) / h);   // one scale for both axes: no stretching
   const ox = (cv.width - w * k) / 2 - x0 * k, oy = (cv.height - h * k) / 2 - y0 * k;
   cx.lineWidth = 7; cx.lineCap = "round"; cx.lineJoin = "round"; cx.strokeStyle = "#4aa8ff";
   cx.shadowColor = "rgba(74,168,255,.6)"; cx.shadowBlur = 14;
   cx.beginPath();
   pts.forEach(([x, y], i) => (i ? cx.lineTo(x * k + ox, y * k + oy) : cx.moveTo(x * k + ox, y * k + oy)));
   cx.stroke(); cx.shadowBlur = 0;
+  cx.fillStyle = "#3ddc84"; cx.beginPath();
+  cx.arc(pts[0][0] * k + ox, pts[0][1] * k + oy, 8, 0, Math.PI * 2); cx.fill();   // where the stroke started
 }
 function flashChar(ch) { const b = $("big"); b.textContent = ch; retrigger(b, "show"); }
+
+// ------------------------------------------------------------------ live sensor graphs
+// The server streams {type:"sens", a:[g], g:[deg/s], m:[gauss]|null} at ~50 Hz whether or not the pen is
+// touching. Each graph keeps the last ~5 s, auto-scales around zero (never tighter than `minRange`), and
+// draws a thin dashed line for the vector length (|accel| should sit near 1 g at rest; |mag| should stay
+// near the calibrated field strength).
+const GRAPH_N = 250;
+const AXIS_COL = ["#ff6b6b", "#3ddc84", "#4aa8ff"];
+class Graph {
+  constructor(canvasId, legendId, opt) {
+    this.cv = $(canvasId); this.leg = $(legendId); this.o = opt;
+    this.buf = [[], [], []]; this.range = opt.minRange; this.dirty = true; this.nodata = false;
+  }
+  push(v) {
+    if (!v || v.length < 3 || v.some((x) => x === null || !isFinite(x))) { this.nodata = true; this.dirty = true; return; }
+    this.nodata = false;
+    for (let i = 0; i < 3; i++) { this.buf[i].push(v[i]); if (this.buf[i].length > GRAPH_N) this.buf[i].shift(); }
+    this.dirty = true;
+  }
+  last() { const n = this.buf[0].length; return n ? [this.buf[0][n - 1], this.buf[1][n - 1], this.buf[2][n - 1]] : null; }
+  legend() {
+    const v = this.last(), d = this.o.dec;
+    if (this.nodata || !v) { this.leg.textContent = this.nodata ? "no data" : ""; return; }
+    const mag = Math.hypot(v[0], v[1], v[2]);
+    this.leg.innerHTML = `<span class="cx">x <i>${v[0].toFixed(d)}</i></span><span class="cy">y <i>${v[1].toFixed(d)}</i></span>`
+      + `<span class="cz">z <i>${v[2].toFixed(d)}</i></span><span>|v| <i>${mag.toFixed(d)}</i></span>`;
+  }
+  draw() {
+    const cv = this.cv, dpr = window.devicePixelRatio || 1;
+    const W = cv.clientWidth, H = cv.clientHeight;
+    if (!W || !H) return;
+    if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+    const g = cv.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, H);
+    const L = 42, R = 8, T = 8, B = 8, pw = W - L - R, ph = H - T - B;
+    let peak = 0;
+    for (let i = 0; i < 3; i++) for (const x of this.buf[i]) peak = Math.max(peak, Math.abs(x));
+    const target = Math.max(this.o.minRange, peak * 1.15);
+    this.range = target > this.range ? target : this.range + (target - this.range) * 0.04;   // grow at once, shrink slowly
+    const R0 = this.range, yOf = (v) => T + ph / 2 - (v / R0) * (ph / 2);
+    g.font = "11px ui-monospace, Menlo, Consolas, monospace"; g.textBaseline = "middle"; g.textAlign = "right";
+    for (const f of [-1, -0.5, 0, 0.5, 1]) {
+      const y = yOf(f * R0);
+      g.strokeStyle = f === 0 ? "#3a4656" : "#1f2832"; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(L, y); g.lineTo(W - R, y); g.stroke();
+      g.fillStyle = "#8b98a8";
+      g.fillText((f * R0).toFixed(R0 >= 10 ? 0 : R0 >= 1 ? 1 : 2), L - 5, Math.min(Math.max(y, T + 6), H - B - 6));
+    }
+    if (this.nodata) {
+      g.fillStyle = "#8b98a8"; g.textAlign = "center"; g.font = "13px system-ui, sans-serif";
+      g.fillText(this.o.nodataMsg || "no data", L + pw / 2, T + ph / 2 - 16);
+      return;
+    }
+    const n = this.buf[0].length; if (n < 2) return;
+    const step = pw / (GRAPH_N - 1), xOf = (i) => W - R - (n - 1 - i) * step;
+    g.lineJoin = "round"; g.lineWidth = 1.6;
+    for (let a = 0; a < 3; a++) {
+      g.strokeStyle = AXIS_COL[a]; g.beginPath();
+      for (let i = 0; i < n; i++) { const x = xOf(i), y = yOf(this.buf[a][i]); i ? g.lineTo(x, y) : g.moveTo(x, y); }
+      g.stroke();
+    }
+    g.strokeStyle = "rgba(230,237,243,.5)"; g.lineWidth = 1; g.setLineDash([4, 3]); g.beginPath();
+    for (let i = 0; i < n; i++) {
+      const m = Math.hypot(this.buf[0][i], this.buf[1][i], this.buf[2][i]), x = xOf(i), y = yOf(m);
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    }
+    g.stroke(); g.setLineDash([]);
+  }
+}
+const GR = {
+  acc: new Graph("gAcc", "lAcc", { minRange: 1.5, dec: 2 }),
+  gyr: new Graph("gGyr", "lGyr", { minRange: 120, dec: 0 }),
+  mag: new Graph("gMag", "lMag", { minRange: 0.6, dec: 3, nodataMsg: "no magnetometer data" }),
+};
+let legendAt = 0;
+(function graphLoop(now) {
+  for (const k in GR) if (GR[k].dirty) { GR[k].dirty = false; GR[k].draw(); }
+  if (now - legendAt > 120) { legendAt = now; for (const k in GR) GR[k].legend(); }
+  requestAnimationFrame(graphLoop);
+})(0);
+window.addEventListener("resize", () => { for (const k in GR) GR[k].dirty = true; });
+function pushSens(m) { GR.acc.push(m.a); GR.gyr.push(m.g); GR.mag.push(m.m); }
 
 // ------------------------------------------------------------------ settings modal
 let pending = null;        // local draft while the modal is open, merged with S.config on every "config"
@@ -831,11 +955,13 @@ function handle(m) {
     case "suggest": S.suggest = m; renderText(); break;
     case "llm": S.llm = m.status; renderLlm(); break;
     case "speak": speakWord(m.word); break;
+    case "speak_text": speakWord(m.text); break;
     case "voice": S.voiceEngine = m.engine; voiceUi(); break;
     case "mode": setMode(m.mode); break;
     case "gest": if (S.mode === "gesture") updateGauges(m); break;
     case "gesture": fireGesture(m); break;
     case "char": flashChar(m.char); break;
+    case "sens": pushSens(m); break;
     case "touch_start": pts = []; drawSketch(); break;
     case "imu": if (m.touched) { pts.push([m.x, m.y]); drawSketch(); } break;
     case "touch_end": break;
@@ -893,6 +1019,7 @@ function unlockVoice() {
 }
 ["pointerdown", "keydown"].forEach((ev) => window.addEventListener(ev, unlockVoice, { once: true }));
 $("voiceBtn").onclick = () => { V.on = !V.on; if (!V.on && voiceSupported()) speechSynthesis.cancel(); voiceSave(); voiceUi(); };
+$("clearBtn").onclick = () => sendWs({ type: "text_clear" });
 $("chkVoice").addEventListener("change", (e) => { V.on = e.target.checked; if (!V.on && voiceSupported()) speechSynthesis.cancel(); voiceSave(); voiceUi(); });
 $("slRate").addEventListener("input", (e) => { V.rate = Number(e.target.value); voiceSave(); voiceUi(); });
 $("selVoiceMode").addEventListener("change", (e) => { V.pref = e.target.value; voiceSave(); voiceUi(); });

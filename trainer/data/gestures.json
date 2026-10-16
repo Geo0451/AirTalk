@@ -1,4 +1,31 @@
 {
   "version": 2,
-  "gestures": {}
+  "gestures": {
+    "twist_ccw": {
+      "label": "Twist anticlockwise \u21ba",
+      "kind": "rot",
+      "dir": [
+        -0.9970528235598171,
+        -0.07307345246465433,
+        0.0233653071088822
+      ],
+      "ref": 1089.6133420898261,
+      "sens": 1.0,
+      "reps": 4,
+      "consistency": 0.9959761356731754
+    },
+    "twist_cw": {
+      "label": "Twist clockwise \u21bb",
+      "kind": "rot",
+      "dir": [
+        0.9767870155964115,
+        0.2121911168703574,
+        -0.029360791603192753
+      ],
+      "ref": 1070.2021039554138,
+      "sens": 1.0,
+      "reps": 6,
+      "consistency": 0.9975621224510949
+    }
+  }
 }

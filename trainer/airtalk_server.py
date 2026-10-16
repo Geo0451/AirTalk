@@ -299,6 +299,12 @@ class Typist:
         self._fire()
         return True
 
+    def clear(self):
+        with self.lock:
+            self.chars = []
+            self.cur = 0
+        self._fire()
+
     def move(self, d):
         with self.lock:
             new = min(max(self.cur + d, 0), len(self.chars))
@@ -371,7 +377,10 @@ class Voice:
             print(f"  [voice] say: {w}")
             try:
                 r = subprocess.run(
-                    self._cmd(w), timeout=15, capture_output=True, text=True
+                    self._cmd(w),
+                    timeout=max(15, len(w) * 0.5),
+                    capture_output=True,
+                    text=True,
                 )
                 if r.returncode != 0:
                     print(
@@ -1004,11 +1013,12 @@ class GestureDetector:
             v = wp if sig["kind"] == "rot" else lp
             n = float(np.linalg.norm(v))
             proj = float(v @ sig["dir"])
-            # |v| * cos^2: both "how hard" and "how well aimed" count, so a big motion about some
-            # other axis doesn't fire this gesture.
-            lg[gid] = (
-                max(0.0, proj) * (max(0.0, proj) / n) / sig["thr"] if n > 1e-6 else 0.0
-            )
+            # Like the factory flicks, the score is the rate ALONG the taught direction vs its threshold,
+            # so ordinary hand wobble doesn't cost you. A motion that points elsewhere is shut out by
+            # an angle gate instead: full score within ~41 deg of the taught direction, none past ~63.
+            cosang = proj / n if n > 1e-6 else 0.0
+            gate = min(1.0, max(0.0, (cosang - 0.45) / 0.30))
+            lg[gid] = max(0.0, proj) / sig["thr"] * gate
         sc.update(lg)
 
         events = []
@@ -1195,13 +1205,19 @@ def _slug(text):
     return "_".join(p for p in s.split("_") if p) or "gesture"
 
 
-def _first_lobe_peak(n):
-    """Index of the peak of the first contiguous stretch of `n` that is >= 60% of its max."""
+def _first_lobe_span(n):
+    """(first, last) index of the first contiguous stretch of `n` that is >= 60% of its max."""
     ok = n >= 0.6 * n.max()
     i0 = int(np.argmax(ok))
     j = i0
     while j + 1 < len(n) and ok[j + 1]:
         j += 1
+    return i0, j
+
+
+def _first_lobe_peak(n):
+    """Index of the peak of the first contiguous stretch of `n` that is >= 60% of its max."""
+    i0, j = _first_lobe_span(n)
     return i0 + int(np.argmax(n[i0 : j + 1]))
 
 
@@ -1386,7 +1402,9 @@ class Learner:
         if c < 1e-6:
             return "the reps cancel each other out (opposite directions?)"
         d = m / c
-        peak = [max(0.0, v @ d) * max(0.0, (v @ d) / np.linalg.norm(v)) for v in use]
+        peak = [
+            max(0.0, v @ d) for v in use
+        ]  # how far each rep reached ALONG the taught direction
         return kind, d, float(np.median(peak)), c, len(use)
 
     def _analyse(self, buf):
@@ -1398,7 +1416,12 @@ class Learner:
             V = np.array([b[idx] for b in buf])[keep]
             n = np.linalg.norm(V, axis=1)
             i = _first_lobe_peak(n)
-            pick[kind] = (V[i], float(n[i]))
+            j0, j1 = _first_lobe_span(n)
+            # Direction = average over the whole stroke (one 10 ms sample at the peak is noisy, so
+            # reps looked less alike than they were); size = the peak.
+            mean = V[j0 : j1 + 1].mean(0)
+            nm = float(np.linalg.norm(mean))
+            pick[kind] = ((mean / nm * n[i]) if nm > 1e-9 else V[i], float(n[i]))
         kind = (
             "rot"
             if pick["rot"][1] / self.REF_DPS >= pick["lin"][1] / self.REF_G
@@ -1630,6 +1653,74 @@ def _num(v):
     return float(v) if math.isfinite(v) else None
 
 
+class SensorTap:
+    """Sits on stream._read, so it sees EVERY packet (touching or not). It (1) streams accel / gyro /
+    calibrated mag to the page at ~50 Hz for the live graphs ({"type": "sens"}), and (2) keeps a slow
+    gravity estimate that the air trace uses to orient its axes at touch-down."""
+
+    HZ = 50.0
+
+    def __init__(self, bc, meta):
+        self.bc, self.meta = bc, meta
+        self.acc_scale = float(meta["acc_scale"])
+        self.bias = np.asarray(meta.get("gyro_bias_dps", [0.0, 0.0, 0.0]), float)
+        self.has_mag = meta_has_mag(meta)
+        self.a_lp = None  # slow-filtered accel, g, sensor frame (reads +1 g toward "up" at rest)
+        self._prev_t = None
+        self._sent_t = -1e9
+
+    def wrap(self, read):
+        def tapped(*a, **k):
+            p = read(*a, **k)
+            if p is not None:
+                try:
+                    self.note(p)
+                except Exception:  # a graph hiccup must never stop the pen stream
+                    pass
+            return p
+
+        return tapped
+
+    def note(self, p):
+        t = float(p[0])
+        a = np.asarray(p[2:5], float) / self.acc_scale
+        if np.isfinite(a).all():
+            if self.a_lp is None:
+                self.a_lp = a.copy()
+            else:
+                dt = (
+                    min(max(t - self._prev_t, 0.0), 0.05)
+                    if self._prev_t is not None
+                    else 0.01
+                )
+                self.a_lp += (1.0 - math.exp(-dt / 0.25)) * (a - self.a_lp)
+        self._prev_t = t
+        if t - self._sent_t < 1.0 / self.HZ - 0.001:
+            return
+        self._sent_t = t
+        w = np.asarray(p[5:8], float) - self.bias
+        raw = np.array([p[8:11]], float)
+        m = None
+        if np.isfinite(raw).all() and np.abs(raw).max() > 0:
+            if self.has_mag:
+                m = apply_mag_cal(
+                    raw,
+                    self.meta["mag_offset"],
+                    self.meta["mag_scale"],
+                    self.meta["mag_align"],
+                )[0]
+            else:
+                m = raw[0]
+        self.bc.send(
+            {
+                "type": "sens",
+                "a": [round(float(x), 3) for x in a],
+                "g": [round(float(x), 1) for x in w],
+                "m": None if m is None else [round(float(x), 4) for x in m],
+            }
+        )
+
+
 class Session:
     def __init__(
         self,
@@ -1643,13 +1734,47 @@ class Session:
         trace_scale=1.0,
         learner=None,
         auto=None,
+        tap=None,
     ):
         self.bc, self.meta, self.stream, self.typist = bc, meta, stream, typist
         self.det, self.args, self.config, self.scale = det, args, config, trace_scale
         self.learner = learner
         self.auto = auto
+        self.tap = tap
+        self.axis = np.asarray(
+            meta["pen_axis"], float
+        )  # calibrated: points toward the TIP
+        self.axis = self.axis / np.linalg.norm(self.axis)
+        self.bias_dps = np.asarray(meta.get("gyro_bias_dps", [0.0, 0.0, 0.0]), float)
+        self.basis = None  # (right, down, tip) unit vectors in the sensor frame, set at each touch-down
         self.active = False
         self.begin(None)
+
+    def _make_basis(self):
+        """The writing plane, from the calibrated pen axis and gravity at touch-down (so it doesn't depend
+        on how the sensor is mounted): `tip` = pen axis (into the page), `down` = gravity projected
+        perpendicular to it, `right` = down x tip. Keeps the previous basis if the pen is pointing nearly
+        straight up/down (then "down" in the writing plane is ambiguous)."""
+        a = self.tap.a_lp if self.tap is not None else None
+        if a is None or float(np.linalg.norm(a)) < 0.5:
+            return self.basis
+        t = self.axis
+        dn = -a / float(np.linalg.norm(a))
+        dnp = dn - (dn @ t) * t
+        n = float(np.linalg.norm(dnp))
+        if n < 0.25:
+            return self.basis
+        dnp = dnp / n
+        return (np.cross(dnp, t), dnp, t)
+
+    def _tip_motion(self, gx, gy, gz):
+        """Tip velocity in the writing plane (deg/s): (+x = tip moves right, +y = tip moves down)."""
+        w = np.array([gx, gy, gz], float) - self.bias_dps
+        if self.basis is None:  # no gravity yet: the original fixed-axes guess
+            return float(w[1]), float(-w[0])
+        right, down, tip = self.basis
+        v = np.cross(w, tip)  # a swing of the pen moves the tip by omega x tip
+        return float(v @ right), float(v @ down)
 
     def begin(self, tap_end):
         self.tap_end = tap_end
@@ -1669,8 +1794,9 @@ class Session:
         dt = max(0.0, t - self.prev_t)
         self.prev_t = t
         if touched:
-            self.tx += gy * dt * self.scale
-            self.ty += -gx * dt * self.scale
+            dx, dy = self._tip_motion(gx, gy, gz)
+            self.tx += dx * dt * self.scale
+            self.ty += dy * dt * self.scale
         msg = {
             "type": "imu",
             "touched": bool(touched),
@@ -1699,6 +1825,7 @@ class Session:
         self.start_t = p[0]
         self.tx = self.ty = 0.0
         self.prev_t = p[0]
+        self.basis = self._make_basis()
         a = self.args
         self.cand = bool(
             a.gestures
@@ -1896,9 +2023,27 @@ def live(args):
         )  # the page speaks it if it chose the browser route
         voice.say(w)  # ...or we do, if it chose the server route
 
+    def speak_all():
+        text = typist.snapshot()["text"].replace("\n", " ")
+        if not text.strip():
+            return
+        broadcaster.send({"type": "speak_text", "text": text})
+        voice.say(text)
+
     typist.on_word = on_word
+    tap = SensorTap(broadcaster, meta)  # live graphs + gravity for the trace axes
+    stream._read = tap.wrap(stream._read)
     sess = Session(
-        broadcaster, meta, stream, typist, det, args, config, learner=learner, auto=auto
+        broadcaster,
+        meta,
+        stream,
+        typist,
+        det,
+        args,
+        config,
+        learner=learner,
+        auto=auto,
+        tap=tap,
     )
 
     def on_ws_message(msg):
@@ -1907,6 +2052,11 @@ def live(args):
             broadcaster.send(
                 config.snapshot()
             )  # echo the resulting config to every client
+        elif msg.get("type") == "text_clear":
+            typist.clear()
+            broadcaster.send(
+                typist.snapshot()
+            )  # tell every page the buffer is now empty
         else:
             voice.on_message(msg)  # voice_set / voice_test
             learner.on_message(msg)  # teach_* / gesture_* (ignores anything else)
@@ -1953,7 +2103,13 @@ def live(args):
 
             dur = cap["duration"]
             if dur < TAP_S:  # a tap: may be the first half of tap-and-hold
-                tap_end = sess.start_t + dur
+                if tap_end is not None and sess.start_t - tap_end <= args.gesture_gap:
+                    tap_end = (
+                        None  # double-tap (outside gesture mode): speak the whole text
+                    )
+                    speak_all()
+                else:
+                    tap_end = sess.start_t + dur
                 continue
             tap_end = None
 
